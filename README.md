@@ -1,0 +1,194 @@
+# cloud-8021x
+
+Terraform deployment for cloud-hosted FreeRADIUS servers on Google Cloud, providing RADIUS/802.1X authentication for WiFi networks using certificate-based EAP-TLS. Works with any RADIUS-capable access point (Ubiquiti UniFi, Cisco Meraki, etc.). Deploys primary and secondary VMs in separate availability zones for HA failover.
+
+## Architecture
+
+```
+MacBook (Okta SCEP cert via Jamf)
+  → WiFi AP (WPA2/WPA3 Enterprise — UniFi, Meraki, etc.)
+    → RADIUS (UDP 1812/1813) over internet
+      → Primary:   FreeRADIUS on GCE VM (us-east4-a, static public IP)
+      → Secondary: FreeRADIUS on GCE VM (us-east4-c, static public IP)
+        → EAP-TLS: validates client cert against Okta Intermediate CA
+        → Access-Accept → WiFi connected
+```
+
+- **Authentication**: EAP-TLS only (no passwords). Client certificates issued by Okta Managed Attestation via Jamf SCEP.
+- **Trust model**: Two independent CA chains. Server cert signed by a self-signed RADIUS CA (generated on first boot). Client certs signed by Okta Intermediate CA.
+- **Accounting**: FreeRADIUS native SQL module writes to local MariaDB (`radacct` table).
+- **Secrets**: All managed via GCP Secret Manager (RADIUS shared secrets, server certs, Okta CA, Datadog API key).
+- **Observability**: Datadog Agent for infrastructure metrics + log shipping to SIEM. FreeRADIUS Prometheus exporter for RADIUS-specific metrics. Structured JSON auth event logs via FreeRADIUS `linelog`.
+
+## Prerequisites
+
+- [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.5
+- GCP account with permissions to create projects and enable billing
+- `gcloud` CLI authenticated (`gcloud auth application-default login`)
+- Okta Intermediate CA certificate (`okta-ca.pem`) from your Okta org
+- Okta Managed Attestation configured in Jamf (SCEP profile)
+
+## Quick Start
+
+```bash
+# 1. Copy and edit the example tfvars
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars — set billing_account_id, office IPs, okta_ca_cert_pem, datadog_api_key
+
+# 2. Initialize and deploy
+terraform init
+terraform plan
+terraform apply
+
+# 3. Fetch outputs (certs, shared secrets, config)
+#    Wait a few minutes for VMs to finish bootstrapping first
+./scripts/fetch-outputs.sh
+
+# Outputs are saved to out/:
+#   out/radius-ca.cer              — RADIUS CA cert (upload to Jamf)
+#   out/radius-server.cer          — RADIUS server cert (reference)
+#   out/shared-secret-<office>.txt — Per-office shared secrets
+#   out/config.json                — IPs, ports, SSH commands
+#   out/README.md                  — Human-readable summary with all values
+```
+
+## What Terraform Creates
+
+| Resource | Purpose |
+|----------|---------|
+| GCP Project | New project with billing, APIs enabled |
+| VPC + Subnet | Custom network (`10.0.1.0/24`) |
+| Static IPs (x2) | Public IPs for primary and secondary RADIUS servers |
+| Firewall rules | UDP 1812/1813 from office IPs, SSH from IAP |
+| GCE Instances (x2) | Primary + secondary in different zones, Debian 12, `e2-medium`, FreeRADIUS + MariaDB |
+| Service Account | Minimal permissions (Secret Manager read/write) |
+| Secret Manager | N+7 secrets (per-office RADIUS secrets, Okta CA, Datadog API key, 5x server certs) |
+
+## Secrets in Secret Manager
+
+| Secret | Populated by | Purpose |
+|--------|-------------|---------|
+| `radius-shared-secret-<office>` | Terraform | Per-office shared secret between APs and RADIUS |
+| `okta-ca-cert` | Terraform | Okta Intermediate CA for client cert validation |
+| `radius-server-ca-key` | Startup script | Self-signed CA private key |
+| `radius-server-ca-cert` | Startup script | Self-signed CA certificate (upload to Jamf) |
+| `radius-server-key` | Startup script | RADIUS server private key |
+| `radius-server-cert` | Startup script | RADIUS server certificate |
+| `radius-dh-params` | Startup script | Diffie-Hellman parameters |
+| `datadog-api-key` | Terraform | Datadog Agent API key |
+
+Server certs are generated on first boot and stored in Secret Manager so they persist across VM replacements. You only need to upload `radius-server-ca-cert` to Jamf once.
+
+## Configuration
+
+### Variables
+
+See [terraform.tfvars.example](terraform.tfvars.example) for all options. Key variables:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `billing_account_id` | Yes | GCP billing account to link |
+| `radius_clients` | Yes | Map of offices with CIDRs (secrets auto-generated) |
+| `okta_ca_cert_pem` | Yes | Okta CA cert PEM content |
+| `datadog_api_key` | Yes | Datadog API key for monitoring agent |
+| `ssh_allowed_cidrs` | No | IPs for SSH access (default: GCP IAP) |
+| `secondary_zone` | No | Zone for secondary VM (default: `us-east4-c`) |
+| `machine_type` | No | VM size (default: `e2-medium`) |
+| `server_cert_cn` | Yes | Server cert CN (e.g. `radius.example.com`) |
+| `server_cert_org` | Yes | Organization name for CA cert subject (e.g. `Acme Corp`) |
+| `datadog_site` | No | Datadog site (default: `us5.datadoghq.com`) |
+
+### Access Point RADIUS Setup
+
+After deployment, run `./scripts/fetch-outputs.sh` and open `out/README.md` for all IPs, shared secrets, and certs in one place.
+
+Configure your access points (UniFi, Meraki, or any 802.1X-capable AP) with:
+
+- **Primary RADIUS Server IP**: from `out/README.md` or `terraform output radius_primary_ip`
+- **Secondary RADIUS Server IP**: from `out/README.md` or `terraform output radius_secondary_ip`
+- **Auth Port**: 1812
+- **Accounting Port**: 1813
+- **Shared Secret**: per-office, from `out/shared-secret-<office>.txt`
+- **Interim Update Interval**: 120 seconds (recommended)
+- **Security**: WPA2/WPA3 Enterprise
+- Enable **RADIUS Assigned VLAN** if using dynamic VLANs
+
+### Jamf Configuration
+
+1. Upload the RADIUS server CA cert to Jamf:
+   ```bash
+   # After running ./scripts/fetch-outputs.sh
+   cat out/radius-ca.cer
+   ```
+   Add this as a **Certificate** payload in a Jamf configuration profile.
+
+2. Create an **SCEP** payload:
+   - SCEP Subject: `CN=$SERIALNUMBER managementAttestation $UDID $PROFILE_IDENTIFIER`
+   - Using `$SERIALNUMBER` as CN avoids spaces that can cause issues with RADIUS username filters
+
+3. Create a **WiFi** payload:
+   - Security: WPA2/WPA3 Enterprise
+   - EAP Type: EAP-TLS
+   - Protocols tab Username: `$SERIALNUMBER` (used as EAP outer identity)
+   - Identity Certificate: Okta SCEP certificate
+   - Trust: Add the server CA cert above
+   - Trusted Server Certificate Names: `radius.example.com` (must match `server_cert_cn`)
+   - Disable Private MAC Address: recommended for consistent device tracking
+
+## Post-Deployment
+
+### SSH Access
+
+```bash
+# Via IAP tunnel (default, no public SSH needed)
+$(terraform output -raw ssh_command_primary)     # Primary VM
+$(terraform output -raw ssh_command_secondary)   # Secondary VM
+
+# Check startup script progress
+sudo cat /var/log/radius-bootstrap.log
+
+# Check FreeRADIUS status
+sudo systemctl status freeradius
+sudo systemctl status mariadb
+sudo systemctl status freeradius-exporter
+sudo systemctl status datadog-agent
+```
+
+### Testing RADIUS
+
+From a host with an allowed source IP:
+
+```bash
+# Basic connectivity test
+radtest user password <radius-ip> 0 <shared-secret>
+
+# Full EAP-TLS test (requires eapol_test from wpa_supplicant)
+eapol_test -c eapol_test.conf -a <radius-ip> -s <shared-secret>
+```
+
+### Check Accounting
+
+```bash
+sudo mysql radius -e "SELECT * FROM radacct ORDER BY radacctid DESC LIMIT 5"
+```
+
+## File Structure
+
+```
+.
+├── main.tf                  # Provider, project, APIs, Secret Manager
+├── variables.tf             # Input variables
+├── network.tf               # VPC, subnet, firewall, static IP
+├── compute.tf               # Service account, IAM, GCE instance
+├── outputs.tf               # IP, SSH command, RADIUS config
+├── terraform.tfvars.example # Example configuration with office IPs
+├── scripts/
+│   ├── startup.sh           # FreeRADIUS + MariaDB install, EAP-TLS config, Datadog, exporter
+│   └── fetch-outputs.sh     # Post-deploy: fetch certs & secrets to out/
+└── out/                     # (gitignored) Certs, shared secrets, config.json, README.md
+```
+
+## Future Work
+
+- **Dynamic VLAN assignment**: Query Okta Devices API to map device → user → group → VLAN
+- **Multi-region**: Deploy additional RADIUS nodes closer to west coast / new offices
