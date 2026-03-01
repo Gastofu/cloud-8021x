@@ -77,6 +77,9 @@ terraform apply
 | `radius-server-cert` | Startup script | RADIUS server certificate |
 | `radius-dh-params` | Startup script | Diffie-Hellman parameters |
 | `datadog-api-key` | Terraform | Datadog Agent API key |
+| `jamf-url` | Terraform (optional) | Jamf Pro base URL for device owner lookup |
+| `jamf-client-id` | Terraform (optional) | Jamf Pro API Client ID |
+| `jamf-client-secret` | Terraform (optional) | Jamf Pro API Client Secret |
 
 Server certs are generated on first boot and stored in Secret Manager so they persist across VM replacements. You only need to upload `radius-server-ca-cert` to Jamf once.
 
@@ -99,6 +102,9 @@ See [terraform.tfvars.example](terraform.tfvars.example) for all options. Key va
 | `server_cert_cn` | Yes | Server cert CN (e.g. `radius.example.com`) |
 | `server_cert_org` | Yes | Organization name for CA cert subject (e.g. `Acme Corp`) |
 | `datadog_site` | No | Datadog site (default: `us5.datadoghq.com`) |
+| `jamf_url` | No | Jamf Pro URL — enables device owner lookup in auth logs |
+| `jamf_client_id` | No | Jamf Pro API Client ID (requires Read Computers) |
+| `jamf_client_secret` | No | Jamf Pro API Client Secret |
 
 ### Access Point RADIUS Setup
 
@@ -154,6 +160,30 @@ To obtain the Root CA from your Okta admin console ([source](https://andrewdoeri
    https://<your-org>-admin.okta.com/api/v1/certificateAuthorities/<id>/cert
    ```
 5. A `.cer` file will download — paste its PEM contents into `okta_root_ca_cert_pem` in your `terraform.tfvars`
+
+### Jamf Device Owner Lookup (Optional)
+
+When EAP-TLS authenticates a device, the outer identity is the serial number (e.g. `H176YHQ9XV`). If you provide Jamf Pro API credentials, FreeRADIUS will query Jamf in post-auth to resolve the serial to the assigned user's email. This:
+
+- Adds `serial` and `device_owner` (email) as separate fields in the JSON auth log
+- Overwrites the RADIUS `User-Name` in the reply so UniFi and accounting show the email instead of the serial
+
+Auth never blocks on the lookup — if Jamf is unreachable or the device isn't found, the serial is used as-is.
+
+**Setup:**
+
+1. In Jamf Pro, create an **API Client** (Settings → API Roles and Clients):
+   - Create an API Role with the **Read Computers** privilege
+   - Create an API Client, assign the role, and note the Client ID and Client Secret
+
+2. Add to your `terraform.tfvars`:
+   ```hcl
+   jamf_url           = "https://yourorg.jamfcloud.com"
+   jamf_client_id     = "your-client-id"
+   jamf_client_secret = "your-client-secret"
+   ```
+
+3. `terraform apply` — creates 3 new secrets in Secret Manager and updates the startup script
 
 ## Post-Deployment
 

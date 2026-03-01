@@ -44,6 +44,23 @@ resource "google_secret_manager_secret_iam_member" "okta_root_ca_access" {
   member    = "serviceAccount:${google_service_account.radius.email}"
 }
 
+# Secret Manager access for Jamf Pro API credentials (optional)
+locals {
+  jamf_secret_ids = var.jamf_url != "" ? [
+    google_secret_manager_secret.jamf_url[0].secret_id,
+    google_secret_manager_secret.jamf_client_id[0].secret_id,
+    google_secret_manager_secret.jamf_client_secret[0].secret_id,
+  ] : []
+}
+
+resource "google_secret_manager_secret_iam_member" "jamf_secrets_access" {
+  for_each  = toset(local.jamf_secret_ids)
+  project   = google_project.this.project_id
+  secret_id = each.value
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.radius.email}"
+}
+
 # Secret Manager read+write for RADIUS server certificates
 # The VM generates certs on first boot and stores them in Secret Manager
 # so they persist across VM replacements.
@@ -82,8 +99,9 @@ locals {
     project_id      = google_project.this.project_id
     server_cert_cn  = var.server_cert_cn
     server_cert_org = var.server_cert_org
-    has_root_ca     = var.okta_root_ca_cert_pem != ""
-    datadog_site    = var.datadog_site
+    has_root_ca      = var.okta_root_ca_cert_pem != ""
+    has_jamf_lookup  = var.jamf_url != ""
+    datadog_site     = var.datadog_site
     radius_clients_json = jsonencode({
       for k, v in var.radius_clients : k => {
         cidrs       = v.cidrs

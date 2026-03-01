@@ -94,6 +94,25 @@ variable "okta_root_ca_cert_pem" {
   sensitive   = true
 }
 
+variable "jamf_url" {
+  description = "Jamf Pro URL (e.g. https://yourorg.jamfcloud.com) — enables device owner lookup in RADIUS auth logs"
+  type        = string
+  default     = ""
+}
+
+variable "jamf_client_id" {
+  description = "Jamf Pro API Client ID (requires Read Computers privilege)"
+  type        = string
+  default     = ""
+}
+
+variable "jamf_client_secret" {
+  description = "Jamf Pro API Client Secret"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "datadog_api_key" {
   description = "Datadog API key for the monitoring agent"
   type        = string

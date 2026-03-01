@@ -52,6 +52,14 @@ server_cert_org = "Example Corp"
 datadog_api_key = "CHANGE-ME-your-datadog-api-key"
 # datadog_site  = "us5.datadoghq.com"  # default; uncomment to override
 
+# Jamf Pro device owner lookup (optional)
+# Enriches RADIUS auth logs with the assigned user's email.
+# Also overwrites the EAP identity so UniFi/accounting shows email instead of serial number.
+# Requires a Jamf Pro API Client with "Read Computers" privilege.
+# jamf_url           = "https://yourorg.jamfcloud.com"
+# jamf_client_id     = "your-api-client-id"
+# jamf_client_secret = "your-api-client-secret"
+
 # Okta Intermediate CA certificate (PEM format)
 # This is the trust anchor for SCEP client certs issued via Jamf/Okta.
 # Paste the full PEM content, or use: okta_ca_cert_pem = file("freeradius/freeradius-wifi-auth/certs/okta-ca.pem")

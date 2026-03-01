@@ -15,6 +15,7 @@ PROJECT_ID="${project_id}"
 SERVER_CERT_CN="${server_cert_cn}"
 SERVER_CERT_ORG="${server_cert_org}"
 HAS_ROOT_CA="${has_root_ca}"
+HAS_JAMF_LOOKUP="${has_jamf_lookup}"
 RADIUS_CLIENTS_JSON='${radius_clients_json}'
 DATADOG_SITE="${datadog_site}"
 
@@ -365,8 +366,124 @@ with open(path, "w") as f:
 FILTERPYEOF
 
 # ---------------------------------------------------------------------------
-# 9. Configure FreeRADIUS JSON auth logging (linelog module)
-#    Emits one JSON line per Access-Accept/Reject for Datadog SIEM.
+# 9. Jamf device owner lookup (optional)
+#    Resolves serial number → assigned user email via Jamf Pro API.
+#    Runs in post-auth so it never blocks authentication.
+# ---------------------------------------------------------------------------
+if [ "$HAS_JAMF_LOOKUP" = "true" ]; then
+    echo "=== Configuring Jamf device owner lookup ==="
+
+    # Fetch Jamf API credentials from Secret Manager
+    JAMF_URL=$(gcloud secrets versions access latest \
+        --secret=jamf-url --project="$PROJECT_ID")
+    JAMF_CLIENT_ID=$(gcloud secrets versions access latest \
+        --secret=jamf-client-id --project="$PROJECT_ID")
+    JAMF_CLIENT_SECRET=$(gcloud secrets versions access latest \
+        --secret=jamf-client-secret --project="$PROJECT_ID")
+
+    # Write credentials file for the lookup script
+    cat > "$RADDB/jamf-credentials.conf" << JAMFCREDEOF
+JAMF_URL=$JAMF_URL
+JAMF_CLIENT_ID=$JAMF_CLIENT_ID
+JAMF_CLIENT_SECRET=$JAMF_CLIENT_SECRET
+JAMFCREDEOF
+    chown freerad:freerad "$RADDB/jamf-credentials.conf"
+    chmod 640 "$RADDB/jamf-credentials.conf"
+
+    # Deploy the lookup script
+    cat > /usr/local/bin/jamf-radius-lookup.sh << 'JAMFSCRIPTEOF'
+#!/bin/bash
+# Jamf Pro device owner lookup for FreeRADIUS exec module.
+# Called with serial number as $1, outputs FreeRADIUS attribute pairs.
+# On any failure, exits silently to avoid blocking auth.
+set -uo pipefail
+
+SERIAL="$1"
+CRED_FILE="/etc/freeradius/3.0/jamf-credentials.conf"
+TOKEN_CACHE="/tmp/jamf-token.json"
+
+[ -z "$SERIAL" ] && exit 0
+[ -f "$CRED_FILE" ] || exit 0
+
+source "$CRED_FILE"
+
+# Get or refresh OAuth2 token
+get_token() {
+    local now
+    now=$(date +%s)
+
+    # Check cached token
+    if [ -f "$TOKEN_CACHE" ]; then
+        local expires_at
+        expires_at=$(jq -r '.expires_at // 0' "$TOKEN_CACHE" 2>/dev/null || echo 0)
+        if [ "$now" -lt "$expires_at" ]; then
+            jq -r '.access_token' "$TOKEN_CACHE" 2>/dev/null
+            return 0
+        fi
+    fi
+
+    # Request new token
+    local response
+    response=$(curl -sf --connect-timeout 3 --max-time 5 \
+        -X POST "$JAMF_URL/api/v1/oauth/token" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "grant_type=client_credentials&client_id=$JAMF_CLIENT_ID&client_secret=$JAMF_CLIENT_SECRET" 2>/dev/null) || return 1
+
+    local token expires_in
+    token=$(echo "$response" | jq -r '.access_token // empty' 2>/dev/null)
+    expires_in=$(echo "$response" | jq -r '.expires_in // 300' 2>/dev/null)
+
+    [ -z "$token" ] && return 1
+
+    # Cache with expiry (subtract 30s buffer)
+    local expires_at=$(( now + expires_in - 30 ))
+    echo "{\"access_token\":\"$token\",\"expires_at\":$expires_at}" > "$TOKEN_CACHE"
+    echo "$token"
+}
+
+TOKEN=$(get_token) || exit 0
+[ -z "$TOKEN" ] && exit 0
+
+# Query Jamf Pro API for device owner
+RESPONSE=$(curl -sf --connect-timeout 3 --max-time 5 \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept: application/json" \
+    "$JAMF_URL/api/v3/computers-inventory?section=USER_AND_LOCATION&filter=hardware.serialNumber%3D%3D%22$SERIAL%22&page-size=1" 2>/dev/null) || exit 0
+
+EMAIL=$(echo "$RESPONSE" | jq -r '.results[0].userAndLocation.email // empty' 2>/dev/null)
+
+# Only output attributes if we got an email
+if [ -n "$EMAIL" ]; then
+    echo "Reply-Message := \"$EMAIL\""
+    echo "User-Name := \"$EMAIL - $SERIAL\""
+fi
+JAMFSCRIPTEOF
+    chmod 755 /usr/local/bin/jamf-radius-lookup.sh
+
+    # Create cache directory
+    mkdir -p /tmp/jamf-token
+    chown freerad:freerad /tmp/jamf-token
+
+    # Configure FreeRADIUS exec module for Jamf lookup
+    cat > "$RADDB/mods-available/jamf_lookup" << 'JAMFMODEOF'
+exec jamf_lookup {
+    wait = yes
+    program = "/usr/local/bin/jamf-radius-lookup.sh %%{User-Name}"
+    input_pairs = request
+    output_pairs = reply
+    shell_escape = yes
+    timeout = 10
+}
+JAMFMODEOF
+    ln -sf "$RADDB/mods-available/jamf_lookup" "$RADDB/mods-enabled/jamf_lookup"
+    echo "Jamf device owner lookup configured."
+fi
+
+# ---------------------------------------------------------------------------
+# 10. Configure FreeRADIUS JSON auth logging (linelog module)
+#     Emits one JSON line per Access-Accept/Reject for Datadog SIEM.
+#     device_owner field is populated by Jamf lookup (empty if disabled).
+#     username is always the serial (request attribute); device_owner is the email.
 # ---------------------------------------------------------------------------
 echo "=== Configuring JSON auth logging ==="
 
@@ -379,9 +496,9 @@ linelog json_log {
     reference = "messages.%%{%%{reply:Packet-Type}:-unknown}"
 
     messages {
-        Access-Accept = "{\"timestamp\":\"%%S\",\"event\":\"Access-Accept\",\"username\":\"%%{User-Name}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\"}"
-        Access-Reject = "{\"timestamp\":\"%%S\",\"event\":\"Access-Reject\",\"username\":\"%%{User-Name}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\",\"reject_reason\":\"%%{Module-Failure-Message}\"}"
-        unknown = "{\"timestamp\":\"%%S\",\"event\":\"unknown\",\"username\":\"%%{User-Name}\",\"nas_ip\":\"%%{NAS-IP-Address}\"}"
+        Access-Accept = "{\"timestamp\":\"%S\",\"event\":\"Access-Accept\",\"serial\":\"%%{User-Name}\",\"device_owner\":\"%%{reply:Reply-Message}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\"}"
+        Access-Reject = "{\"timestamp\":\"%S\",\"event\":\"Access-Reject\",\"username\":\"%%{User-Name}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\",\"reject_reason\":\"%%{Module-Failure-Message}\"}"
+        unknown = "{\"timestamp\":\"%S\",\"event\":\"unknown\",\"username\":\"%%{User-Name}\",\"nas_ip\":\"%%{NAS-IP-Address}\"}"
     }
 }
 JSONLOGEOF
@@ -393,12 +510,19 @@ chown freerad:freerad /var/log/freeradius/radius-auth.json
 chmod 640 /var/log/freeradius/radius-auth.json
 
 # ---------------------------------------------------------------------------
-# 10. Configure default virtual server (site)
+# 11. Configure default virtual server (site)
 #     Clean EAP-TLS-only site with SQL accounting and JSON logging.
 # ---------------------------------------------------------------------------
 echo "=== Configuring default virtual server ==="
 
-cat > "$RADDB/sites-available/default" << 'SITEEOF'
+# Build post-auth section — conditionally include Jamf lookup before logging
+POSTAUTH_MODULES="json_log"
+if [ "$HAS_JAMF_LOOKUP" = "true" ]; then
+    POSTAUTH_MODULES="jamf_lookup
+        json_log"
+fi
+
+cat > "$RADDB/sites-available/default" << SITEEOF
 server default {
     listen {
         type = auth
@@ -432,7 +556,7 @@ server default {
     }
 
     post-auth {
-        json_log
+        $POSTAUTH_MODULES
         Post-Auth-Type REJECT {
             json_log
         }
@@ -444,7 +568,7 @@ SITEEOF
 rm -f "$RADDB/sites-enabled/inner-tunnel"
 
 # ---------------------------------------------------------------------------
-# 11. Configure status virtual server (for Prometheus exporter)
+# 12. Configure status virtual server (for Prometheus exporter)
 # ---------------------------------------------------------------------------
 echo "=== Configuring status virtual server ==="
 
@@ -470,7 +594,7 @@ STATUSEOF
 ln -sf "$RADDB/sites-available/status" "$RADDB/sites-enabled/status"
 
 # ---------------------------------------------------------------------------
-# 12. Start FreeRADIUS
+# 13. Start FreeRADIUS
 # ---------------------------------------------------------------------------
 echo "=== Starting FreeRADIUS ==="
 
@@ -486,7 +610,7 @@ systemctl start freeradius
 echo "FreeRADIUS started successfully."
 
 # ---------------------------------------------------------------------------
-# 13. Install Datadog Agent
+# 14. Install Datadog Agent
 # ---------------------------------------------------------------------------
 echo "=== Installing Datadog Agent ==="
 
@@ -530,7 +654,7 @@ logs:
 DDLOGSEOF
 
 # ---------------------------------------------------------------------------
-# 14. Install FreeRADIUS Prometheus Exporter
+# 15. Install FreeRADIUS Prometheus Exporter
 # ---------------------------------------------------------------------------
 echo "=== Installing FreeRADIUS Prometheus Exporter ==="
 
@@ -572,7 +696,7 @@ systemctl enable freeradius-exporter
 systemctl start freeradius-exporter
 
 # ---------------------------------------------------------------------------
-# 15. Configure Datadog OpenMetrics integration for FreeRADIUS metrics
+# 16. Configure Datadog OpenMetrics integration for FreeRADIUS metrics
 # ---------------------------------------------------------------------------
 echo "=== Configuring Datadog OpenMetrics for FreeRADIUS ==="
 

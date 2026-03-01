@@ -191,6 +191,65 @@ resource "google_secret_manager_secret_version" "okta_root_ca_cert" {
 }
 
 # -----------------------------------------------------------------------------
+# Secret Manager — Jamf Pro API credentials (optional)
+# Enables device owner lookup: serial → email in RADIUS post-auth logs.
+# -----------------------------------------------------------------------------
+
+resource "google_secret_manager_secret" "jamf_url" {
+  count     = var.jamf_url != "" ? 1 : 0
+  project   = google_project.this.project_id
+  secret_id = "jamf-url"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.apis["secretmanager.googleapis.com"]]
+}
+
+resource "google_secret_manager_secret_version" "jamf_url" {
+  count       = var.jamf_url != "" ? 1 : 0
+  secret      = google_secret_manager_secret.jamf_url[0].id
+  secret_data = var.jamf_url
+}
+
+resource "google_secret_manager_secret" "jamf_client_id" {
+  count     = var.jamf_url != "" ? 1 : 0
+  project   = google_project.this.project_id
+  secret_id = "jamf-client-id"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.apis["secretmanager.googleapis.com"]]
+}
+
+resource "google_secret_manager_secret_version" "jamf_client_id" {
+  count       = var.jamf_url != "" ? 1 : 0
+  secret      = google_secret_manager_secret.jamf_client_id[0].id
+  secret_data = var.jamf_client_id
+}
+
+resource "google_secret_manager_secret" "jamf_client_secret" {
+  count     = var.jamf_url != "" ? 1 : 0
+  project   = google_project.this.project_id
+  secret_id = "jamf-client-secret"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.apis["secretmanager.googleapis.com"]]
+}
+
+resource "google_secret_manager_secret_version" "jamf_client_secret" {
+  count       = var.jamf_url != "" ? 1 : 0
+  secret      = google_secret_manager_secret.jamf_client_secret[0].id
+  secret_data = var.jamf_client_secret
+}
+
+# -----------------------------------------------------------------------------
 # Secret Manager — Datadog API key
 # -----------------------------------------------------------------------------
 
