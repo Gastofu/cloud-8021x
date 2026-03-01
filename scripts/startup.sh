@@ -16,6 +16,7 @@ SERVER_CERT_CN="${server_cert_cn}"
 SERVER_CERT_ORG="${server_cert_org}"
 HAS_ROOT_CA="${has_root_ca}"
 HAS_JAMF_LOOKUP="${has_jamf_lookup}"
+HAS_UNIFI_LOOKUP="${has_unifi_lookup}"
 RADIUS_CLIENTS_JSON='${radius_clients_json}'
 DATADOG_SITE="${datadog_site}"
 
@@ -480,7 +481,139 @@ JAMFMODEOF
 fi
 
 # ---------------------------------------------------------------------------
-# 10. Configure FreeRADIUS JSON auth logging (linelog module)
+# 10. UniFi AP name + site name lookup (optional)
+#     Caches device list from UniFi cloud API, resolves NAS-IP to AP name.
+#     Uses Packet-Src-IP-Address (public gateway IP) to disambiguate sites.
+# ---------------------------------------------------------------------------
+if [ "$HAS_UNIFI_LOOKUP" = "true" ]; then
+    echo "=== Configuring UniFi AP name lookup ==="
+
+    # Fetch UniFi API key from Secret Manager
+    UNIFI_API_KEY=$(gcloud secrets versions access latest \
+        --secret=unifi-api-key --project="$PROJECT_ID")
+
+    # Write credentials file for the cache/lookup scripts
+    cat > "$RADDB/unifi-credentials.conf" << UNIFICREDEOF
+UNIFI_API_KEY=$UNIFI_API_KEY
+UNIFICREDEOF
+    chown freerad:freerad "$RADDB/unifi-credentials.conf"
+    chmod 640 "$RADDB/unifi-credentials.conf"
+
+    # Deploy the cache refresh script
+    cat > /usr/local/bin/unifi-ap-cache.sh << 'UNIFICACHEEOF'
+#!/bin/bash
+# Fetches UniFi hosts + devices, builds AP name + site name cache.
+# Called on boot and every 5 minutes via cron.
+set -uo pipefail
+
+CRED_FILE="/etc/freeradius/3.0/unifi-credentials.conf"
+CACHE_FILE="/etc/freeradius/3.0/unifi-ap-cache.json"
+
+[ -f "$CRED_FILE" ] || exit 0
+source "$CRED_FILE"
+
+API="https://api.ui.com/v1"
+
+HOSTS=$(curl -sf --connect-timeout 5 --max-time 15 \
+    -H "X-API-Key: $UNIFI_API_KEY" \
+    -H "Accept: application/json" \
+    "$API/hosts" 2>/dev/null) || exit 0
+
+DEVICES=$(curl -sf --connect-timeout 5 --max-time 15 \
+    -H "X-API-Key: $UNIFI_API_KEY" \
+    -H "Accept: application/json" \
+    "$API/devices" 2>/dev/null) || exit 0
+
+python3 << PYEOF
+import json
+
+hosts_data = json.loads('''$HOSTS''')
+devices_data = json.loads('''$DEVICES''')
+
+# Build hostId -> {wans: [ipv4s], hostname: str}
+host_info = {}
+for h in hosts_data.get("data", []):
+    rs = h.get("reportedState", {})
+    wans = [w["ipv4"] for w in rs.get("wans", []) if w.get("ipv4")]
+    hostname = rs.get("hostname", "").replace("-", " ")
+    if wans:
+        host_info[h["id"]] = {"wans": wans, "hostname": hostname}
+
+# Build wan_ip:lan_ip -> ap_name and wan_ip -> site_name
+ap_map = {}
+site_map = {}
+for entry in devices_data.get("data", []):
+    hid = entry.get("hostId")
+    info = host_info.get(hid)
+    if not info:
+        continue
+    site_name = entry.get("hostName", info["hostname"])
+    for suffix in [" UNVR", " unvr"]:
+        if site_name.endswith(suffix):
+            site_name = site_name[:-len(suffix)]
+    for wip in info["wans"]:
+        site_map[wip] = site_name
+    for dev in entry.get("devices", []):
+        if dev.get("productLine") != "network":
+            continue
+        lip = dev.get("ip", "")
+        name = dev.get("name", "")
+        if lip and name:
+            for wip in info["wans"]:
+                ap_map[f"{wip}:{lip}"] = name
+
+with open("$${CACHE_FILE}.tmp", "w") as f:
+    json.dump({"devices": ap_map, "sites": site_map}, f)
+PYEOF
+
+    mv "$${CACHE_FILE}.tmp" "$CACHE_FILE" 2>/dev/null
+UNIFICACHEEOF
+    chmod 755 /usr/local/bin/unifi-ap-cache.sh
+
+    # Deploy the FreeRADIUS lookup script
+    cat > /usr/local/bin/unifi-ap-lookup.sh << 'UNIFILOOKUPEOF'
+#!/bin/bash
+# Called by FreeRADIUS exec module with Packet-Src-IP and NAS-IP.
+# Reads from cached file, outputs reply attributes.
+SRC_IP="$1"
+NAS_IP="$2"
+CACHE="/etc/freeradius/3.0/unifi-ap-cache.json"
+
+[ -z "$SRC_IP" ] || [ -z "$NAS_IP" ] && exit 0
+[ -f "$CACHE" ] || exit 0
+
+AP_NAME=$(jq -r --arg key "$${SRC_IP}:$${NAS_IP}" '.devices[$key] // empty' "$CACHE" 2>/dev/null)
+SITE_NAME=$(jq -r --arg ip "$SRC_IP" '.sites[$ip] // empty' "$CACHE" 2>/dev/null)
+
+[ -n "$AP_NAME" ] && echo "Callback-Id := \"$AP_NAME\""
+[ -n "$SITE_NAME" ] && echo "Connect-Info := \"$SITE_NAME\""
+UNIFILOOKUPEOF
+    chmod 755 /usr/local/bin/unifi-ap-lookup.sh
+
+    # Run initial cache build
+    /usr/local/bin/unifi-ap-cache.sh || true
+
+    # Set up cron to refresh cache every 5 minutes
+    echo "*/5 * * * * root /usr/local/bin/unifi-ap-cache.sh" > /etc/cron.d/unifi-ap-cache
+    chmod 644 /etc/cron.d/unifi-ap-cache
+
+    # Configure FreeRADIUS exec module for UniFi lookup
+    cat > "$RADDB/mods-available/unifi_lookup" << 'UNIFIMODEOF'
+exec unifi_lookup {
+    wait = yes
+    program = "/usr/local/bin/unifi-ap-lookup.sh %%{Packet-Src-IP-Address} %%{NAS-IP-Address}"
+    input_pairs = request
+    output_pairs = reply
+    shell_escape = yes
+    timeout = 3
+}
+UNIFIMODEOF
+    ln -sf "$RADDB/mods-available/unifi_lookup" "$RADDB/mods-enabled/unifi_lookup"
+    echo "UniFi AP name lookup configured."
+fi
+
+# ---------------------------------------------------------------------------
+# 11. Configure FreeRADIUS JSON auth logging (linelog module)
 #     Emits one JSON line per Access-Accept/Reject for Datadog SIEM.
 #     device_owner field is populated by Jamf lookup (empty if disabled).
 #     username is always the serial (request attribute); device_owner is the email.
@@ -496,9 +629,9 @@ linelog json_log {
     reference = "messages.%%{%%{reply:Packet-Type}:-unknown}"
 
     messages {
-        Access-Accept = "{\"timestamp\":\"%S\",\"event\":\"Access-Accept\",\"serial\":\"%%{User-Name}\",\"device_owner\":\"%%{reply:Reply-Message}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\"}"
-        Access-Reject = "{\"timestamp\":\"%S\",\"event\":\"Access-Reject\",\"username\":\"%%{User-Name}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\",\"reject_reason\":\"%%{Module-Failure-Message}\"}"
-        unknown = "{\"timestamp\":\"%S\",\"event\":\"unknown\",\"username\":\"%%{User-Name}\",\"nas_ip\":\"%%{NAS-IP-Address}\"}"
+        Access-Accept = "{\"timestamp\":\"%S\",\"event\":\"Access-Accept\",\"serial\":\"%%{User-Name}\",\"device_owner\":\"%%{reply:Reply-Message}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\"}"
+        Access-Reject = "{\"timestamp\":\"%S\",\"event\":\"Access-Reject\",\"username\":\"%%{User-Name}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\",\"reject_reason\":\"%%{Module-Failure-Message}\"}"
+        unknown = "{\"timestamp\":\"%S\",\"event\":\"unknown\",\"username\":\"%%{User-Name}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\"}"
     }
 }
 JSONLOGEOF
@@ -515,12 +648,13 @@ chmod 640 /var/log/freeradius/radius-auth.json
 # ---------------------------------------------------------------------------
 echo "=== Configuring default virtual server ==="
 
-# Build post-auth section — conditionally include Jamf lookup before logging
-POSTAUTH_MODULES="json_log"
-if [ "$HAS_JAMF_LOOKUP" = "true" ]; then
-    POSTAUTH_MODULES="jamf_lookup
-        json_log"
-fi
+# Build post-auth section — conditionally include lookups before logging
+POSTAUTH_MODULES=""
+[ "$HAS_JAMF_LOOKUP" = "true" ] && POSTAUTH_MODULES="$${POSTAUTH_MODULES}jamf_lookup
+        "
+[ "$HAS_UNIFI_LOOKUP" = "true" ] && POSTAUTH_MODULES="$${POSTAUTH_MODULES}unifi_lookup
+        "
+POSTAUTH_MODULES="$${POSTAUTH_MODULES}json_log"
 
 cat > "$RADDB/sites-available/default" << SITEEOF
 server default {

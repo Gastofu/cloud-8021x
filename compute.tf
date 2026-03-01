@@ -61,6 +61,15 @@ resource "google_secret_manager_secret_iam_member" "jamf_secrets_access" {
   member    = "serviceAccount:${google_service_account.radius.email}"
 }
 
+# Secret Manager access for UniFi API key (optional)
+resource "google_secret_manager_secret_iam_member" "unifi_api_key_access" {
+  count     = var.unifi_api_key != "" ? 1 : 0
+  project   = google_project.this.project_id
+  secret_id = google_secret_manager_secret.unifi_api_key[0].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.radius.email}"
+}
+
 # Secret Manager read+write for RADIUS server certificates
 # The VM generates certs on first boot and stores them in Secret Manager
 # so they persist across VM replacements.
@@ -101,6 +110,7 @@ locals {
     server_cert_org = var.server_cert_org
     has_root_ca      = var.okta_root_ca_cert_pem != ""
     has_jamf_lookup  = var.jamf_url != ""
+    has_unifi_lookup = var.unifi_api_key != ""
     datadog_site     = var.datadog_site
     radius_clients_json = jsonencode({
       for k, v in var.radius_clients : k => {

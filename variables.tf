@@ -113,6 +113,13 @@ variable "jamf_client_secret" {
   sensitive   = true
 }
 
+variable "unifi_api_key" {
+  description = "UniFi Site Manager API key — enables AP name and site name lookup in RADIUS auth logs"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "datadog_api_key" {
   description = "Datadog API key for the monitoring agent"
   type        = string

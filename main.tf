@@ -250,6 +250,29 @@ resource "google_secret_manager_secret_version" "jamf_client_secret" {
 }
 
 # -----------------------------------------------------------------------------
+# Secret Manager — UniFi API key (optional)
+# Enables AP name and site name lookup in RADIUS auth logs.
+# -----------------------------------------------------------------------------
+
+resource "google_secret_manager_secret" "unifi_api_key" {
+  count     = var.unifi_api_key != "" ? 1 : 0
+  project   = google_project.this.project_id
+  secret_id = "unifi-api-key"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.apis["secretmanager.googleapis.com"]]
+}
+
+resource "google_secret_manager_secret_version" "unifi_api_key" {
+  count       = var.unifi_api_key != "" ? 1 : 0
+  secret      = google_secret_manager_secret.unifi_api_key[0].id
+  secret_data = var.unifi_api_key
+}
+
+# -----------------------------------------------------------------------------
 # Secret Manager — Datadog API key
 # -----------------------------------------------------------------------------
 
