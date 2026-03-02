@@ -51,7 +51,7 @@ fi
 # 2. Install FreeRADIUS + MariaDB
 # ---------------------------------------------------------------------------
 echo "=== Installing FreeRADIUS and MariaDB ==="
-apt-get install -y freeradius freeradius-utils freeradius-mysql mariadb-server
+apt-get install -y freeradius freeradius-utils freeradius-mysql freeradius-python3 mariadb-server
 
 # Stop services while we configure them
 systemctl stop freeradius 2>/dev/null || true
@@ -368,8 +368,8 @@ FILTERPYEOF
 
 # ---------------------------------------------------------------------------
 # 9. Jamf device owner lookup (optional)
-#    Resolves serial number → assigned user email via Jamf Pro API.
-#    Runs in post-auth so it never blocks authentication.
+#    Resolves serial number → assigned user email, device name, model via
+#    Jamf Pro API. Credentials stored as JSON for Python module consumption.
 # ---------------------------------------------------------------------------
 if [ "$HAS_JAMF_LOOKUP" = "true" ]; then
     echo "=== Configuring Jamf device owner lookup ==="
@@ -382,102 +382,18 @@ if [ "$HAS_JAMF_LOOKUP" = "true" ]; then
     JAMF_CLIENT_SECRET=$(gcloud secrets versions access latest \
         --secret=jamf-client-secret --project="$PROJECT_ID")
 
-    # Write credentials file for the lookup script
-    cat > "$RADDB/jamf-credentials.conf" << JAMFCREDEOF
-JAMF_URL=$JAMF_URL
-JAMF_CLIENT_ID=$JAMF_CLIENT_ID
-JAMF_CLIENT_SECRET=$JAMF_CLIENT_SECRET
+    # Write JSON credentials file for the Python lookup module
+    cat > "$RADDB/jamf-credentials.json" << JAMFCREDEOF
+{"url": "$JAMF_URL", "client_id": "$JAMF_CLIENT_ID", "client_secret": "$JAMF_CLIENT_SECRET"}
 JAMFCREDEOF
-    chown freerad:freerad "$RADDB/jamf-credentials.conf"
-    chmod 640 "$RADDB/jamf-credentials.conf"
+    chown freerad:freerad "$RADDB/jamf-credentials.json"
+    chmod 640 "$RADDB/jamf-credentials.json"
 
-    # Deploy the lookup script
-    cat > /usr/local/bin/jamf-radius-lookup.sh << 'JAMFSCRIPTEOF'
-#!/bin/bash
-# Jamf Pro device owner lookup for FreeRADIUS exec module.
-# Called with serial number as $1, outputs FreeRADIUS attribute pairs.
-# On any failure, exits silently to avoid blocking auth.
-set -uo pipefail
-
-SERIAL="$1"
-CRED_FILE="/etc/freeradius/3.0/jamf-credentials.conf"
-TOKEN_CACHE="/tmp/jamf-token.json"
-
-[ -z "$SERIAL" ] && exit 0
-[ -f "$CRED_FILE" ] || exit 0
-
-source "$CRED_FILE"
-
-# Get or refresh OAuth2 token
-get_token() {
-    local now
-    now=$(date +%s)
-
-    # Check cached token
-    if [ -f "$TOKEN_CACHE" ]; then
-        local expires_at
-        expires_at=$(jq -r '.expires_at // 0' "$TOKEN_CACHE" 2>/dev/null || echo 0)
-        if [ "$now" -lt "$expires_at" ]; then
-            jq -r '.access_token' "$TOKEN_CACHE" 2>/dev/null
-            return 0
-        fi
-    fi
-
-    # Request new token
-    local response
-    response=$(curl -sf --connect-timeout 3 --max-time 5 \
-        -X POST "$JAMF_URL/api/v1/oauth/token" \
-        -H "Content-Type: application/x-www-form-urlencoded" \
-        -d "grant_type=client_credentials&client_id=$JAMF_CLIENT_ID&client_secret=$JAMF_CLIENT_SECRET" 2>/dev/null) || return 1
-
-    local token expires_in
-    token=$(echo "$response" | jq -r '.access_token // empty' 2>/dev/null)
-    expires_in=$(echo "$response" | jq -r '.expires_in // 300' 2>/dev/null)
-
-    [ -z "$token" ] && return 1
-
-    # Cache with expiry (subtract 30s buffer)
-    local expires_at=$(( now + expires_in - 30 ))
-    echo "{\"access_token\":\"$token\",\"expires_at\":$expires_at}" > "$TOKEN_CACHE"
-    echo "$token"
-}
-
-TOKEN=$(get_token) || exit 0
-[ -z "$TOKEN" ] && exit 0
-
-# Query Jamf Pro API for device owner
-RESPONSE=$(curl -sf --connect-timeout 3 --max-time 5 \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "Accept: application/json" \
-    "$JAMF_URL/api/v3/computers-inventory?section=USER_AND_LOCATION&filter=hardware.serialNumber%3D%3D%22$SERIAL%22&page-size=1" 2>/dev/null) || exit 0
-
-EMAIL=$(echo "$RESPONSE" | jq -r '.results[0].userAndLocation.email // empty' 2>/dev/null)
-
-# Only output attributes if we got an email
-if [ -n "$EMAIL" ]; then
-    echo "Reply-Message := \"$EMAIL\""
-    echo "User-Name := \"$EMAIL - $SERIAL\""
-fi
-JAMFSCRIPTEOF
-    chmod 755 /usr/local/bin/jamf-radius-lookup.sh
-
-    # Create cache directory
+    # Create token cache directory
     mkdir -p /tmp/jamf-token
     chown freerad:freerad /tmp/jamf-token
 
-    # Configure FreeRADIUS exec module for Jamf lookup
-    cat > "$RADDB/mods-available/jamf_lookup" << 'JAMFMODEOF'
-exec jamf_lookup {
-    wait = yes
-    program = "/usr/local/bin/jamf-radius-lookup.sh %%{User-Name}"
-    input_pairs = request
-    output_pairs = reply
-    shell_escape = yes
-    timeout = 10
-}
-JAMFMODEOF
-    ln -sf "$RADDB/mods-available/jamf_lookup" "$RADDB/mods-enabled/jamf_lookup"
-    echo "Jamf device owner lookup configured."
+    echo "Jamf credentials configured."
 fi
 
 # ---------------------------------------------------------------------------
@@ -539,9 +455,10 @@ for h in hosts_data.get("data", []):
     if wans:
         host_info[h["id"]] = {"wans": wans, "hostname": hostname}
 
-# Build wan_ip:lan_ip -> ap_name and wan_ip -> site_name
+# Build wan_ip:lan_ip -> ap_name, wan_ip -> site_name, and mac -> {ap, site}
 ap_map = {}
 site_map = {}
+by_mac = {}
 for entry in devices_data.get("data", []):
     hid = entry.get("hostId")
     info = host_info.get(hid)
@@ -558,37 +475,20 @@ for entry in devices_data.get("data", []):
             continue
         lip = dev.get("ip", "")
         name = dev.get("name", "")
+        mac = dev.get("mac", "").upper()
         if lip and name:
             for wip in info["wans"]:
                 ap_map[f"{wip}:{lip}"] = name
+        if mac and name:
+            by_mac[mac] = {"ap_name": name, "site_name": site_name}
 
 with open("$${CACHE_FILE}.tmp", "w") as f:
-    json.dump({"devices": ap_map, "sites": site_map}, f)
+    json.dump({"devices": ap_map, "sites": site_map, "by_mac": by_mac}, f)
 PYEOF
 
     mv "$${CACHE_FILE}.tmp" "$CACHE_FILE" 2>/dev/null
 UNIFICACHEEOF
     chmod 755 /usr/local/bin/unifi-ap-cache.sh
-
-    # Deploy the FreeRADIUS lookup script
-    cat > /usr/local/bin/unifi-ap-lookup.sh << 'UNIFILOOKUPEOF'
-#!/bin/bash
-# Called by FreeRADIUS exec module with Packet-Src-IP and NAS-IP.
-# Reads from cached file, outputs reply attributes.
-SRC_IP="$1"
-NAS_IP="$2"
-CACHE="/etc/freeradius/3.0/unifi-ap-cache.json"
-
-[ -z "$SRC_IP" ] || [ -z "$NAS_IP" ] && exit 0
-[ -f "$CACHE" ] || exit 0
-
-AP_NAME=$(jq -r --arg key "$${SRC_IP}:$${NAS_IP}" '.devices[$key] // empty' "$CACHE" 2>/dev/null)
-SITE_NAME=$(jq -r --arg ip "$SRC_IP" '.sites[$ip] // empty' "$CACHE" 2>/dev/null)
-
-[ -n "$AP_NAME" ] && echo "Callback-Id := \"$AP_NAME\""
-[ -n "$SITE_NAME" ] && echo "Connect-Info := \"$SITE_NAME\""
-UNIFILOOKUPEOF
-    chmod 755 /usr/local/bin/unifi-ap-lookup.sh
 
     # Run initial cache build
     /usr/local/bin/unifi-ap-cache.sh || true
@@ -597,19 +497,240 @@ UNIFILOOKUPEOF
     echo "*/5 * * * * root /usr/local/bin/unifi-ap-cache.sh" > /etc/cron.d/unifi-ap-cache
     chmod 644 /etc/cron.d/unifi-ap-cache
 
-    # Configure FreeRADIUS exec module for UniFi lookup
-    cat > "$RADDB/mods-available/unifi_lookup" << 'UNIFIMODEOF'
-exec unifi_lookup {
-    wait = yes
-    program = "/usr/local/bin/unifi-ap-lookup.sh %%{Packet-Src-IP-Address} %%{NAS-IP-Address}"
-    input_pairs = request
-    output_pairs = reply
-    shell_escape = yes
-    timeout = 3
+    echo "UniFi AP cache configured."
+fi
+
+# ---------------------------------------------------------------------------
+# 10a. Python lookup module (rlm_python3)
+#      Single module handles both Jamf and UniFi lookups in post-auth and
+#      accounting. Sets reply attributes directly — no exec output parsing.
+# ---------------------------------------------------------------------------
+if [ "$HAS_JAMF_LOOKUP" = "true" ] || [ "$HAS_UNIFI_LOOKUP" = "true" ]; then
+    echo "=== Configuring Python lookup module ==="
+
+    mkdir -p "$RADDB/mods-config/python3"
+
+    cat > "$RADDB/mods-config/python3/radius_lookups.py" << 'PYMODEOF'
+import radiusd
+import json
+import os
+import time
+import urllib.request
+import urllib.parse
+
+JAMF_CRED_FILE = "/etc/freeradius/3.0/jamf-credentials.json"
+JAMF_TOKEN_CACHE = "/tmp/jamf-token/token.json"
+UNIFI_CACHE_FILE = "/etc/freeradius/3.0/unifi-ap-cache.json"
+
+
+def instantiate(p):
+    radiusd.radlog(radiusd.L_INFO, "radius_lookups module loaded")
+    return 0
+
+
+def _get_jamf_token(creds):
+    """Get or refresh Jamf OAuth2 token with file-based caching."""
+    now = int(time.time())
+
+    # Check cached token
+    try:
+        with open(JAMF_TOKEN_CACHE, "r") as f:
+            cached = json.load(f)
+        if now < cached.get("expires_at", 0):
+            return cached["access_token"]
+    except Exception:
+        pass
+
+    # Request new token
+    data = urllib.parse.urlencode({
+        "grant_type": "client_credentials",
+        "client_id": creds["client_id"],
+        "client_secret": creds["client_secret"],
+    }).encode()
+    req = urllib.request.Request(
+        f"{creds['url']}/api/v1/oauth/token",
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    resp = urllib.request.urlopen(req, timeout=5)
+    result = json.loads(resp.read())
+
+    token = result.get("access_token")
+    if not token:
+        return None
+
+    expires_in = result.get("expires_in", 300)
+    cache_data = {"access_token": token, "expires_at": now + expires_in - 30}
+    try:
+        with open(JAMF_TOKEN_CACHE, "w") as f:
+            json.dump(cache_data, f)
+    except Exception:
+        pass
+
+    return token
+
+
+def _jamf_lookup(serial):
+    """Look up device info from Jamf Pro API. Returns dict or None."""
+    if not os.path.isfile(JAMF_CRED_FILE):
+        return None
+
+    with open(JAMF_CRED_FILE, "r") as f:
+        creds = json.load(f)
+
+    token = _get_jamf_token(creds)
+    if not token:
+        return None
+
+    encoded_serial = urllib.parse.quote(serial)
+    url = (
+        f"{creds['url']}/api/v3/computers-inventory"
+        f"?section=GENERAL&section=HARDWARE&section=USER_AND_LOCATION"
+        f"&filter=hardware.serialNumber%3D%3D%22{encoded_serial}%22"
+        f"&page-size=1"
+    )
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    })
+    resp = urllib.request.urlopen(req, timeout=5)
+    data = json.loads(resp.read())
+
+    results = data.get("results", [])
+    if not results:
+        return None
+
+    device = results[0]
+    return {
+        "email": (device.get("userAndLocation") or {}).get("email") or "",
+        "device_name": (device.get("general") or {}).get("name") or "",
+        "device_model": (device.get("hardware") or {}).get("model") or "",
+    }
+
+
+def _unifi_lookup(called_station_id):
+    """Look up AP name and site from UniFi cache by Called-Station-Id MAC.
+
+    Called-Station-Id contains a BSSID (per-radio virtual MAC) which is the
+    AP's base MAC + a small offset (0-7) on the last byte. We try exact match
+    first, then decrement the last byte by 1-7 to find the base MAC.
+    Returns dict or None.
+    """
+    if not called_station_id or not os.path.isfile(UNIFI_CACHE_FILE):
+        return None
+
+    # Called-Station-Id format: "AA-BB-CC-DD-EE-FF:SSID" or "AA-BB-CC-DD-EE-FF"
+    # Extract MAC portion (before colon) and normalize to uppercase hex without separators
+    mac_part = called_station_id.split(":")[0] if ":" in called_station_id else called_station_id
+    mac = mac_part.replace("-", "").replace(".", "").upper()
+
+    if len(mac) != 12:
+        return None
+
+    with open(UNIFI_CACHE_FILE, "r") as f:
+        cache = json.load(f)
+
+    by_mac = cache.get("by_mac", {})
+
+    # Try exact BSSID match first
+    if mac in by_mac:
+        entry = by_mac[mac]
+        return {"ap_name": entry.get("ap_name", ""), "site_name": entry.get("site_name", "")}
+
+    # BSSID = base_mac + offset (0-7) on last byte. Try decrementing to find base MAC.
+    prefix = mac[:10]
+    last_byte = int(mac[10:12], 16)
+    for offset in range(1, 8):
+        candidate = prefix + format(last_byte - offset, "02X")
+        if candidate in by_mac:
+            entry = by_mac[candidate]
+            return {"ap_name": entry.get("ap_name", ""), "site_name": entry.get("site_name", "")}
+
+    return None
+
+
+def _get_attr(p, attr_name):
+    """Extract a request attribute from p.
+
+    p is always a dict with pass_all_vps_dict=yes:
+      {"request": ((name, value), ...), "reply": ..., ...}
+    The request value is a tuple of (name, value) tuples, NOT a dict.
+    """
+    request = p.get("request", ()) if isinstance(p, dict) else p
+    if isinstance(request, (list, tuple)):
+        for item in request:
+            if isinstance(item, (list, tuple)) and len(item) >= 2 and item[0] == attr_name:
+                return item[1]
+    return ""
+
+
+def post_auth(p):
+    """Post-auth: Jamf device lookup + UniFi AP/site lookup."""
+    try:
+        user_name = _get_attr(p, "User-Name")
+        called_station = _get_attr(p, "Called-Station-Id")
+
+        reply_attrs = []
+
+        # Jamf lookup — extract serial from User-Name (it's the raw serial
+        # at this point, before we rewrite it to "email - serial")
+        serial = user_name.strip()
+        if serial:
+            try:
+                jamf = _jamf_lookup(serial)
+                if jamf:
+                    if jamf["device_name"]:
+                        reply_attrs.append(("Filter-Id", jamf["device_name"]))
+                    if jamf["device_model"]:
+                        reply_attrs.append(("Login-LAT-Node", jamf["device_model"]))
+                    if jamf["email"]:
+                        reply_attrs.append(("Reply-Message", jamf["email"]))
+                        reply_attrs.append(("User-Name", f"{jamf['email']} - {serial}"))
+            except Exception as e:
+                radiusd.radlog(radiusd.L_ERR, f"Jamf lookup failed: {e}")
+
+        # UniFi lookup — use Called-Station-Id (AP BSSID) to identify AP
+        if called_station:
+            try:
+                unifi = _unifi_lookup(called_station)
+                if unifi:
+                    if unifi["ap_name"]:
+                        reply_attrs.append(("Callback-Id", unifi["ap_name"]))
+                    if unifi["site_name"]:
+                        reply_attrs.append(("Connect-Info", unifi["site_name"]))
+            except Exception as e:
+                radiusd.radlog(radiusd.L_ERR, f"UniFi lookup failed: {e}")
+
+        if reply_attrs:
+            return radiusd.RLM_MODULE_UPDATED, {"reply": tuple(reply_attrs)}
+        return radiusd.RLM_MODULE_OK
+
+    except Exception as e:
+        radiusd.radlog(radiusd.L_ERR, f"radius_lookups post_auth error: {e}")
+        return radiusd.RLM_MODULE_OK
+
+
+PYMODEOF
+    chown -R freerad:freerad "$RADDB/mods-config/python3"
+
+    # Configure FreeRADIUS python3 module
+    cat > "$RADDB/mods-available/radius_lookups" << 'PYLOOKUPEOF'
+python3 radius_lookups {
+    python_path = /etc/freeradius/3.0/mods-config/python3
+    module = radius_lookups
+    pass_all_vps_dict = yes
+
+    mod_instantiate = $${.module}
+    func_instantiate = instantiate
+
+    mod_post_auth = $${.module}
+    func_post_auth = post_auth
+
 }
-UNIFIMODEOF
-    ln -sf "$RADDB/mods-available/unifi_lookup" "$RADDB/mods-enabled/unifi_lookup"
-    echo "UniFi AP name lookup configured."
+PYLOOKUPEOF
+    ln -sf "$RADDB/mods-available/radius_lookups" "$RADDB/mods-enabled/radius_lookups"
+
+    echo "Python lookup module configured."
 fi
 
 # ---------------------------------------------------------------------------
@@ -629,8 +750,8 @@ linelog json_log {
     reference = "messages.%%{%%{reply:Packet-Type}:-unknown}"
 
     messages {
-        Access-Accept = "{\"timestamp\":\"%S\",\"event\":\"Access-Accept\",\"serial\":\"%%{User-Name}\",\"device_owner\":\"%%{reply:Reply-Message}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\"}"
-        Access-Reject = "{\"timestamp\":\"%S\",\"event\":\"Access-Reject\",\"username\":\"%%{User-Name}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\",\"reject_reason\":\"%%{Module-Failure-Message}\"}"
+        Access-Accept = "{\"timestamp\":\"%S\",\"event\":\"Access-Accept\",\"serial\":\"%%{User-Name}\",\"device_owner\":\"%%{reply:Reply-Message}\",\"device_name\":\"%%{reply:Filter-Id}\",\"device_model\":\"%%{reply:Login-LAT-Node}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\"}"
+        Access-Reject = "{\"timestamp\":\"%S\",\"event\":\"Access-Reject\",\"username\":\"%%{User-Name}\",\"device_name\":\"%%{reply:Filter-Id}\",\"device_model\":\"%%{reply:Login-LAT-Node}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\",\"reject_reason\":\"%%{Module-Failure-Message}\"}"
         unknown = "{\"timestamp\":\"%S\",\"event\":\"unknown\",\"username\":\"%%{User-Name}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\"}"
     }
 }
@@ -652,9 +773,9 @@ linelog acct_log {
     reference = "messages.%%{Acct-Status-Type}"
 
     messages {
-        Start = "{\"timestamp\":\"%S\",\"event\":\"Acct-Start\",\"username\":\"%%{User-Name}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\"}"
-        Stop = "{\"timestamp\":\"%S\",\"event\":\"Acct-Stop\",\"username\":\"%%{User-Name}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"session_time\":%%{Acct-Session-Time},\"input_bytes\":%%{Acct-Input-Octets},\"output_bytes\":%%{Acct-Output-Octets},\"terminate_cause\":\"%%{Acct-Terminate-Cause}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\"}"
-        Interim-Update = "{\"timestamp\":\"%S\",\"event\":\"Acct-Update\",\"username\":\"%%{User-Name}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"session_time\":%%{Acct-Session-Time},\"input_bytes\":%%{Acct-Input-Octets},\"output_bytes\":%%{Acct-Output-Octets},\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\"}"
+        Start = "{\"timestamp\":\"%S\",\"event\":\"Acct-Start\",\"username\":\"%%{User-Name}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"session_id\":\"%%{Acct-Session-Id}\"}"
+        Stop = "{\"timestamp\":\"%S\",\"event\":\"Acct-Stop\",\"username\":\"%%{User-Name}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"session_time\":%%{Acct-Session-Time},\"input_bytes\":%%{Acct-Input-Octets},\"output_bytes\":%%{Acct-Output-Octets},\"terminate_cause\":\"%%{Acct-Terminate-Cause}\"}"
+        Interim-Update = "{\"timestamp\":\"%S\",\"event\":\"Acct-Update\",\"username\":\"%%{User-Name}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"session_time\":%%{Acct-Session-Time},\"input_bytes\":%%{Acct-Input-Octets},\"output_bytes\":%%{Acct-Output-Octets}\"}"
     }
 }
 ACCTLOGEOF
@@ -671,19 +792,16 @@ chmod 640 /var/log/freeradius/radius-acct.json
 # ---------------------------------------------------------------------------
 echo "=== Configuring default virtual server ==="
 
-# Build post-auth section — conditionally include lookups before logging
+# Build post-auth section — single Python module handles both Jamf + UniFi
 POSTAUTH_MODULES=""
-[ "$HAS_JAMF_LOOKUP" = "true" ] && POSTAUTH_MODULES="$${POSTAUTH_MODULES}jamf_lookup
+if [ "$HAS_JAMF_LOOKUP" = "true" ] || [ "$HAS_UNIFI_LOOKUP" = "true" ]; then
+    POSTAUTH_MODULES="radius_lookups
         "
-[ "$HAS_UNIFI_LOOKUP" = "true" ] && POSTAUTH_MODULES="$${POSTAUTH_MODULES}unifi_lookup
-        "
+fi
 POSTAUTH_MODULES="$${POSTAUTH_MODULES}json_log"
 
-# Build accounting section — conditionally include UniFi lookup for enrichment
-ACCT_MODULES=""
-[ "$HAS_UNIFI_LOOKUP" = "true" ] && ACCT_MODULES="unifi_lookup
-        "
-ACCT_MODULES="$${ACCT_MODULES}sql
+# Build accounting section — SQL + JSON log
+ACCT_MODULES="sql
         acct_log"
 
 cat > "$RADDB/sites-available/default" << SITEEOF
