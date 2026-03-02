@@ -890,6 +890,54 @@ def post_auth(p):
         return radiusd.RLM_MODULE_OK
 
 
+def accounting(p):
+    """Accounting: enrich with Jamf device info + UniFi AP/site from cache."""
+    try:
+        user_name = _get_attr(p, "User-Name")
+        called_station = _get_attr(p, "Called-Station-Id")
+
+        reply_attrs = []
+
+        # Extract serial from User-Name — may be "email - serial" if AP
+        # cached the rewritten identity from post-auth, or just the serial
+        serial = user_name.strip()
+        if " - " in serial:
+            serial = serial.rsplit(" - ", 1)[1]
+
+        if serial:
+            try:
+                jamf = _get_cached_jamf(serial)
+                if jamf:
+                    if jamf.get("device_name"):
+                        reply_attrs.append(("Filter-Id", jamf["device_name"]))
+                    if jamf.get("device_model"):
+                        reply_attrs.append(("Login-LAT-Node", jamf["device_model"]))
+                    if jamf.get("email"):
+                        reply_attrs.append(("Reply-Message", jamf["email"]))
+            except Exception as e:
+                radiusd.radlog(radiusd.L_ERR, f"Jamf cache read in accounting failed: {e}")
+
+        # UniFi lookup
+        if called_station:
+            try:
+                unifi = _unifi_lookup(called_station)
+                if unifi:
+                    if unifi["ap_name"]:
+                        reply_attrs.append(("Callback-Id", unifi["ap_name"]))
+                    if unifi["site_name"]:
+                        reply_attrs.append(("Connect-Info", unifi["site_name"]))
+            except Exception as e:
+                radiusd.radlog(radiusd.L_ERR, f"UniFi lookup in accounting failed: {e}")
+
+        if reply_attrs:
+            return radiusd.RLM_MODULE_UPDATED, {"reply": tuple(reply_attrs)}
+        return radiusd.RLM_MODULE_OK
+
+    except Exception as e:
+        radiusd.radlog(radiusd.L_ERR, f"radius_lookups accounting error: {e}")
+        return radiusd.RLM_MODULE_OK
+
+
 PYMODEOF
     chown -R freerad:freerad "$RADDB/mods-config/python3"
 
@@ -905,6 +953,9 @@ python3 radius_lookups {
 
     mod_post_auth = $${.module}
     func_post_auth = post_auth
+
+    mod_accounting = $${.module}
+    func_accounting = accounting
 
 }
 PYLOOKUPEOF
@@ -953,9 +1004,9 @@ linelog acct_log {
     reference = "messages.%%{Acct-Status-Type}"
 
     messages {
-        Start = "{\"timestamp\":\"%S\",\"event\":\"Acct-Start\",\"username\":\"%%{User-Name}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"called_station\":\"%%{Called-Station-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"multi_session_id\":\"%%{Acct-Multi-Session-Id}\"}"
-        Stop = "{\"timestamp\":\"%S\",\"event\":\"Acct-Stop\",\"username\":\"%%{User-Name}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"called_station\":\"%%{Called-Station-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"multi_session_id\":\"%%{Acct-Multi-Session-Id}\",\"session_time\":%%{Acct-Session-Time},\"input_bytes\":%%{Acct-Input-Octets},\"output_bytes\":%%{Acct-Output-Octets},\"terminate_cause\":\"%%{Acct-Terminate-Cause}\"}"
-        Interim-Update = "{\"timestamp\":\"%S\",\"event\":\"Acct-Update\",\"username\":\"%%{User-Name}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"called_station\":\"%%{Called-Station-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"multi_session_id\":\"%%{Acct-Multi-Session-Id}\",\"session_time\":%%{Acct-Session-Time},\"input_bytes\":%%{Acct-Input-Octets},\"output_bytes\":%%{Acct-Output-Octets}\"}"
+        Start = "{\"timestamp\":\"%S\",\"event\":\"Acct-Start\",\"username\":\"%%{User-Name}\",\"device_owner\":\"%%{reply:Reply-Message}\",\"device_name\":\"%%{reply:Filter-Id}\",\"device_model\":\"%%{reply:Login-LAT-Node}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"called_station\":\"%%{Called-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"multi_session_id\":\"%%{Acct-Multi-Session-Id}\"}"
+        Stop = "{\"timestamp\":\"%S\",\"event\":\"Acct-Stop\",\"username\":\"%%{User-Name}\",\"device_owner\":\"%%{reply:Reply-Message}\",\"device_name\":\"%%{reply:Filter-Id}\",\"device_model\":\"%%{reply:Login-LAT-Node}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"called_station\":\"%%{Called-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"multi_session_id\":\"%%{Acct-Multi-Session-Id}\",\"session_time\":%%{Acct-Session-Time},\"input_bytes\":%%{Acct-Input-Octets},\"output_bytes\":%%{Acct-Output-Octets},\"terminate_cause\":\"%%{Acct-Terminate-Cause}\"}"
+        Interim-Update = "{\"timestamp\":\"%S\",\"event\":\"Acct-Update\",\"username\":\"%%{User-Name}\",\"device_owner\":\"%%{reply:Reply-Message}\",\"device_name\":\"%%{reply:Filter-Id}\",\"device_model\":\"%%{reply:Login-LAT-Node}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"called_station\":\"%%{Called-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"multi_session_id\":\"%%{Acct-Multi-Session-Id}\",\"session_time\":%%{Acct-Session-Time},\"input_bytes\":%%{Acct-Input-Octets},\"output_bytes\":%%{Acct-Output-Octets}\"}"
     }
 }
 ACCTLOGEOF
@@ -980,8 +1031,13 @@ if [ "$HAS_JAMF_LOOKUP" = "true" ] || [ "$HAS_UNIFI_LOOKUP" = "true" ]; then
 fi
 POSTAUTH_MODULES="$${POSTAUTH_MODULES}json_log"
 
-# Build accounting section — SQL + JSON log
-ACCT_MODULES="sql
+# Build accounting section — enrichment + SQL + JSON log
+ACCT_MODULES=""
+if [ "$HAS_JAMF_LOOKUP" = "true" ] || [ "$HAS_UNIFI_LOOKUP" = "true" ]; then
+    ACCT_MODULES="radius_lookups
+        "
+fi
+ACCT_MODULES="$${ACCT_MODULES}sql
         acct_log"
 
 cat > "$RADDB/sites-available/default" << SITEEOF
