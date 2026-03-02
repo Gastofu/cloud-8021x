@@ -18,7 +18,8 @@ MacBook (Okta SCEP cert via Jamf)
 - **Trust model**: Two independent CA chains. Server cert signed by a self-signed RADIUS CA (generated on first boot). Client certs signed by Okta Intermediate CA.
 - **Accounting**: FreeRADIUS native SQL module writes to local MariaDB (`radacct` table).
 - **Secrets**: All managed via GCP Secret Manager (RADIUS shared secrets, server certs, Okta CA, Datadog API key).
-- **Observability**: Datadog Agent for infrastructure metrics + log shipping to SIEM. FreeRADIUS Prometheus exporter for RADIUS-specific metrics. Structured JSON auth event logs via FreeRADIUS `linelog`.
+- **Observability**: Datadog Agent for infrastructure metrics + log shipping to SIEM. FreeRADIUS Prometheus exporter for RADIUS-specific metrics. Structured JSON auth and accounting logs via FreeRADIUS `linelog`.
+- **Log enrichment**: Optional Jamf and UniFi integrations add device owner, device name, model, AP name, and site name to both auth and accounting JSON logs. Jamf data is served from a local cache (no API calls on the auth path).
 
 ## Prerequisites
 
@@ -167,14 +168,14 @@ To obtain the Root CA from your Okta admin console ([source](https://andrewdoeri
 
 ### Jamf Device Lookup (Optional)
 
-When EAP-TLS authenticates a device, the outer identity is the serial number (e.g. `H176YHQ9XV`). If you provide Jamf Pro API credentials, FreeRADIUS will query Jamf in post-auth to resolve the serial to device details. This adds the following fields to the JSON auth log:
+When EAP-TLS authenticates a device, the outer identity is the serial number (e.g. `H176YHQ9XV`). If you provide Jamf Pro API credentials, a background cache script bulk-fetches all Jamf inventory and stores it locally. FreeRADIUS reads from this cache (no API calls on the auth path) to resolve the serial to device details. This adds the following fields to both auth and accounting JSON logs:
 
 - `device_owner` — assigned user's email from Jamf
 - `device_name` — device name (e.g. `Robbie's MacBook Pro`)
 - `device_model` — hardware model (e.g. `MacBook Pro (16-inch, 2024) M4 Max`)
-- Overwrites `User-Name` in the reply to `email - serial` so UniFi and accounting show the owner
+- In auth: overwrites `User-Name` in the reply to `email - serial` so UniFi and accounting show the owner
 
-Auth never blocks on the lookup — if Jamf is unreachable or the device isn't found, the serial is used as-is.
+The cache is built on boot and refreshed every 30 minutes via cron. Cache misses trigger a background fetch (does not block auth). If Jamf is unreachable or the device isn't found, the serial is used as-is.
 
 **Setup:**
 
@@ -193,10 +194,11 @@ Auth never blocks on the lookup — if Jamf is unreachable or the device isn't f
 
 ### UniFi AP/Site Lookup (Optional)
 
-If you provide UniFi API credentials, FreeRADIUS will resolve the access point and site name for each authentication. A cache script queries the UniFi API every 5 minutes and builds a local MAC-to-AP lookup table. The Python module matches the client's BSSID (from `Called-Station-Id`) to the AP's base MAC using fuzzy matching (last-byte offset 0-7). This adds to the JSON auth log:
+If you provide UniFi API credentials, FreeRADIUS will resolve the access point and site name for each authentication and accounting event. A cache script queries the UniFi API every 5 minutes and builds a local MAC-to-AP lookup table. The Python module matches the client's BSSID (from `Called-Station-Id`) to the AP's base MAC using fuzzy matching (last-byte offset 0-7). This adds to both auth and accounting JSON logs:
 
 - `ap_name` — access point name (e.g. `Lobby`)
 - `site_name` — UniFi site name (e.g. `32 Avenue of the Americas`)
+- Auth logs also include `ssid` — extracted from `Called-Station-Id`
 
 **Setup:**
 
@@ -257,11 +259,14 @@ sudo mysql radius -e "SELECT * FROM radacct ORDER BY radacctid DESC LIMIT 5"
 ├── compute.tf               # Service account, IAM, GCE instance
 ├── outputs.tf               # IP, SSH command, RADIUS config
 ├── terraform.tfvars.example # Example configuration with office IPs
+├── ARCHITECTURE.md          # Technical deep-dive: auth flow, startup script, log enrichment
 ├── scripts/
 │   ├── startup.sh           # FreeRADIUS + MariaDB install, EAP-TLS config, Datadog, exporter
 │   └── fetch-outputs.sh     # Post-deploy: fetch certs & secrets to out/
 └── out/                     # (gitignored) Certs, shared secrets, config.json, README.md
 ```
+
+For a detailed technical walkthrough of the startup script, authentication flow, log enrichment pipeline, and caching architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Future Work
 
