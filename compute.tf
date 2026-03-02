@@ -105,9 +105,9 @@ resource "google_secret_manager_secret_iam_member" "cert_secrets_write" {
 
 locals {
   startup_script = templatefile("${path.module}/scripts/startup.sh", {
-    project_id      = google_project.this.project_id
-    server_cert_cn  = var.server_cert_cn
-    server_cert_org = var.server_cert_org
+    project_id       = google_project.this.project_id
+    server_cert_cn   = var.server_cert_cn
+    server_cert_org  = var.server_cert_org
     has_root_ca      = var.okta_root_ca_cert_pem != ""
     has_jamf_lookup  = var.jamf_url != ""
     has_unifi_lookup = var.unifi_api_key != ""

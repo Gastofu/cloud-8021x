@@ -8,3 +8,6 @@ crash.log
 .DS_Store
 freeradius/
 out/
+tfplan
+*.cert
+.claude/

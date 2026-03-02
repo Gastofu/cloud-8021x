@@ -23,6 +23,11 @@ output "ssh_command_secondary" {
   value       = "gcloud compute ssh radius-secondary --zone=${var.secondary_zone} --project=${google_project.this.project_id} --tunnel-through-iap"
 }
 
+output "datadog_dashboard_url" {
+  description = "Datadog dashboard URL (empty if dashboard is disabled)"
+  value       = nonsensitive(local.datadog_enabled ? "https://app.${var.datadog_site}${datadog_dashboard_json.radius[0].url}" : "")
+}
+
 output "unifi_radius_config" {
   description = "Values for UniFi RADIUS server profile — configure both primary and secondary servers"
   value = {

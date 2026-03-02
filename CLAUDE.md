@@ -31,6 +31,8 @@ This repo deploys a standalone FreeRADIUS server on Google Cloud (GCE) via Terra
 - `network.tf` — VPC, subnet, static IP, firewall rules
 - `compute.tf` — Service account, IAM bindings, GCE instance definition
 - `outputs.tf` — Deployment outputs (IP, SSH command, RADIUS config)
+- `datadog.tf` — Optional Datadog dashboard (Terraform-managed, requires `datadog_app_key`)
+- `datadog-dashboard.json` — Static JSON export of dashboard (importable via Datadog UI)
 - `scripts/startup.sh` — Idempotent bootstrap: installs FreeRADIUS + MariaDB, configures EAP-TLS, manages certs via Secret Manager
 
 ## Commands
@@ -57,3 +59,14 @@ terraform output        # Show outputs (IP, SSH command, etc.)
 - `server_cert_cn` — RADIUS server certificate CN (must match Jamf WiFi profile)
 - `server_cert_org` — Organization name used in CA and server cert subjects
 - `radius_clients` — Map of offices with CIDRs and descriptions
+- `datadog_app_key` — Datadog Application key (enables Terraform-managed dashboard; empty = skip)
+
+## Datadog Dashboard
+
+- Defined in `datadog.tf` using `datadog_dashboard_json` resource, gated by `count = local.datadog_enabled ? 1 : 0`
+- Dashboard JSON is built from `local.dashboard_json` (HCL map) then encoded via `jsonencode()`
+- Static export in `datadog-dashboard.json` — regenerate with: `echo 'jsonencode(local.dashboard_json)' | terraform console 2>/dev/null | python3 -c 'import sys,json; raw=sys.stdin.read().strip(); data=json.loads(json.loads(raw)); print(json.dumps(data, indent=2))' > datadog-dashboard.json`
+- Template variables: `$site` (filters by `@site_name` log facet) and `$host` (filters metrics + logs by host)
+- Metric queries use `{$host}` filter; FreeRADIUS counter metrics need `.count` suffix (Datadog OpenMetrics appends it automatically to Prometheus counters)
+- Log queries filter with `host:$host.value @site_name:$site.value`
+- Log-based widgets require facets declared in Datadog UI (see README for full list) — Terraform provider does not support facet creation

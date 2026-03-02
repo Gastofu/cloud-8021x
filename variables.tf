@@ -131,3 +131,10 @@ variable "datadog_site" {
   type        = string
   default     = "us5.datadoghq.com"
 }
+
+variable "datadog_app_key" {
+  description = "Datadog Application key (enables Terraform-managed dashboard). Leave empty to skip. Scope to dashboards_read + dashboards_write only."
+  type        = string
+  default     = ""
+  sensitive   = true
+}

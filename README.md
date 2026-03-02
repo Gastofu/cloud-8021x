@@ -110,6 +110,7 @@ See [terraform.tfvars.example](terraform.tfvars.example) for all options. Key va
 | `jamf_client_secret` | No | Jamf Pro API Client Secret |
 | `unifi_url` | No | UniFi API URL — enables AP/site name in auth logs |
 | `unifi_api_key` | No | UniFi API key (read-only access) |
+| `datadog_app_key` | No | Datadog Application key — enables Terraform-managed dashboard |
 
 ### Access Point RADIUS Setup
 
@@ -212,6 +213,46 @@ If you provide UniFi API credentials, FreeRADIUS will resolve the access point a
 
 3. `terraform apply` — creates 2 new secrets in Secret Manager and enables the cache cron job
 
+### Datadog Dashboard (Optional)
+
+![Datadog Dashboard](docs/datadog-dashboard.png)
+
+If you provide a Datadog Application key, Terraform creates a dashboard with authentication metrics, device analytics, location breakdowns, accounting sessions, and infrastructure health.
+
+1. In Datadog, create an **Application Key** (Organization Settings → Application Keys) scoped to `dashboards_read` + `dashboards_write` only.
+
+2. Add to your `terraform.tfvars`:
+   ```hcl
+   datadog_app_key = "your-application-key"
+   ```
+
+3. `terraform apply` — creates the dashboard, outputs the URL via `terraform output datadog_dashboard_url`.
+
+**Without Terraform**: Import `datadog-dashboard.json` via Datadog UI → Dashboards → New Dashboard → Import Dashboard JSON.
+
+**Required: Create Log Facets**
+
+The dashboard's log-based widgets and the `$site` template variable filter require log facets to be declared in Datadog. These are **not** auto-created — the Datadog Terraform provider [does not support facet creation](https://github.com/DataDog/terraform-provider-datadog/issues/1644).
+
+After your first log data arrives, go to **Datadog → Logs → Facets → Add** and create the following:
+
+| Facet | Path | Type | Used by |
+|-------|------|------|---------|
+| `@event` | `@event` | String | Auth widgets (Accept/Reject filtering) |
+| `@site_name` | `@site_name` | String | Site template variable, Auth by Site, Top APs |
+| `@ap_name` | `@ap_name` | String | Top Access Points |
+| `@ssid` | `@ssid` | String | Auth by SSID |
+| `@device_name` | `@device_name` | String | Top Devices |
+| `@device_owner` | `@device_owner` | String | Top Device Owners |
+| `@device_model` | `@device_model` | String | Device Model Distribution |
+| `@reject_reason` | `@reject_reason` | String | Reject Reasons |
+| `@terminate_cause` | `@terminate_cause` | String | Session Termination Causes |
+| `@session_time` | `@session_time` | Measure (seconds) | Avg Session Duration |
+| `@input_bytes` | `@input_bytes` | Measure (bytes) | Bandwidth widgets |
+| `@output_bytes` | `@output_bytes` | Measure (bytes) | Bandwidth widgets |
+
+**Tip**: String facets can be added from any log entry — click the field value and select "Create facet". Measure facets (`@session_time`, `@input_bytes`, `@output_bytes`) must be created as **Measures** (not facets) to support aggregations like `avg` and `sum`.
+
 ## Post-Deployment
 
 ### SSH Access
@@ -258,6 +299,8 @@ sudo mysql radius -e "SELECT * FROM radacct ORDER BY radacctid DESC LIMIT 5"
 ├── network.tf               # VPC, subnet, firewall, static IP
 ├── compute.tf               # Service account, IAM, GCE instance
 ├── outputs.tf               # IP, SSH command, RADIUS config
+├── datadog.tf               # Optional Datadog dashboard (requires datadog_app_key)
+├── datadog-dashboard.json   # Dashboard JSON export (importable via Datadog UI)
 ├── terraform.tfvars.example # Example configuration with office IPs
 ├── ARCHITECTURE.md          # Technical deep-dive: auth flow, startup script, log enrichment
 ├── scripts/

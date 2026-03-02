@@ -336,6 +336,8 @@ The `radius_lookups` module is only included if Jamf or UniFi integrations are e
 - Datadog OpenMetrics integration scrapes the exporter
 - Metrics: `freeradius_total_access_accepts`, `freeradius_total_access_rejects`, `freeradius_total_accounting_requests`, etc.
 
+**Missing metrics**: The exporter defines several metrics that are always zero in this deployment: `outstanding_requests`, `queue_use_percentage`, `state`, `ema_window`, `last_packet_recv`, `last_packet_sent`. These map to FreeRADIUS vendor-specific attributes (Vendor ID 11344, attribute types 172-185) that are **home server statistics** — they are only populated when FreeRADIUS is acting as a proxy forwarding requests to other RADIUS servers. Since this is a standalone (non-proxying) deployment, FreeRADIUS never includes them in the status response. The exporter reports `freeradius_stats_error{error=""} 1` as a result. The Datadog dashboard intentionally omits widgets for these metrics.
+
 ### Log files on disk
 
 | File | Content | Rotation |

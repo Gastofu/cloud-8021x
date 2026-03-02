@@ -50,7 +50,8 @@ server_cert_org = "Example Corp"
 # The agent collects infrastructure metrics, FreeRADIUS metrics (via Prometheus exporter),
 # and ships logs to Datadog SIEM.
 datadog_api_key = "CHANGE-ME-your-datadog-api-key"
-# datadog_site  = "us5.datadoghq.com"  # default; uncomment to override
+# datadog_site    = "us5.datadoghq.com"  # default; uncomment to override
+# datadog_app_key = "your-datadog-app-key"  # enables Terraform-managed dashboard; scope to dashboards_read + dashboards_write
 
 # Jamf Pro device owner lookup (optional)
 # Enriches RADIUS auth logs with the assigned user's email.

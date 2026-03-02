@@ -1005,7 +1005,7 @@ linelog acct_log {
 
     messages {
         Start = "{\"timestamp\":\"%S\",\"event\":\"Acct-Start\",\"username\":\"%%{User-Name}\",\"device_owner\":\"%%{reply:Reply-Message}\",\"device_name\":\"%%{reply:Filter-Id}\",\"device_model\":\"%%{reply:Login-LAT-Node}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"called_station\":\"%%{Called-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"multi_session_id\":\"%%{Acct-Multi-Session-Id}\"}"
-        Stop = "{\"timestamp\":\"%S\",\"event\":\"Acct-Stop\",\"username\":\"%%{User-Name}\",\"device_owner\":\"%%{reply:Reply-Message}\",\"device_name\":\"%%{reply:Filter-Id}\",\"device_model\":\"%%{reply:Login-LAT-Node}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"called_station\":\"%%{Called-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"multi_session_id\":\"%%{Acct-Multi-Session-Id}\",\"session_time\":%%{Acct-Session-Time},\"input_bytes\":%%{Acct-Input-Octets},\"output_bytes\":%%{Acct-Output-Octets},\"terminate_cause\":\"%%{Acct-Terminate-Cause}\"}"
+        Stop = "{\"timestamp\":\"%S\",\"event\":\"Acct-Stop\",\"username\":\"%%{User-Name}\",\"device_owner\":\"%%{reply:Reply-Message}\",\"device_name\":\"%%{reply:Filter-Id}\",\"device_model\":\"%%{reply:Login-LAT-Node}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"called_station\":\"%%{Called-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"multi_session_id\":\"%%{Acct-Multi-Session-Id}\",\"session_time\":%%{Acct-Session-Time},\"input_bytes\":%%{Acct-Input-Octets},\"output_bytes\":%%{Acct-Output-Octets},\"terminate_cause\":\"%%{%%{Acct-Terminate-Cause}:-Unknown}\"}"
         Interim-Update = "{\"timestamp\":\"%S\",\"event\":\"Acct-Update\",\"username\":\"%%{User-Name}\",\"device_owner\":\"%%{reply:Reply-Message}\",\"device_name\":\"%%{reply:Filter-Id}\",\"device_model\":\"%%{reply:Login-LAT-Node}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"called_station\":\"%%{Called-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"session_id\":\"%%{Acct-Session-Id}\",\"multi_session_id\":\"%%{Acct-Multi-Session-Id}\",\"session_time\":%%{Acct-Session-Time},\"input_bytes\":%%{Acct-Input-Octets},\"output_bytes\":%%{Acct-Output-Octets}\"}"
     }
 }
@@ -1138,6 +1138,14 @@ DD_API_KEY=$(gcloud secrets versions access latest \
 DD_API_KEY="$DD_API_KEY" DD_SITE="$DATADOG_SITE" \
     bash -c "$(curl -fsSL https://install.datadoghq.com/scripts/install_script_agent7.sh)"
 
+# Set hostname to GCE instance name (ensures host tag matches dashboard queries)
+INSTANCE_NAME=$(curl -sS -H "Metadata-Flavor: Google" \
+    http://metadata.google.internal/computeMetadata/v1/instance/name)
+sed -i "s/^# hostname:.*$/hostname: $INSTANCE_NAME/" /etc/datadog-agent/datadog.yaml
+if ! grep -q "^hostname:" /etc/datadog-agent/datadog.yaml; then
+    echo "hostname: $INSTANCE_NAME" >> /etc/datadog-agent/datadog.yaml
+fi
+
 # Enable log collection
 sed -i 's/^# logs_enabled: false/logs_enabled: true/' /etc/datadog-agent/datadog.yaml
 if ! grep -q "^logs_enabled: true" /etc/datadog-agent/datadog.yaml; then
@@ -1235,28 +1243,33 @@ instances:
   - openmetrics_endpoint: http://localhost:9812/metrics
     namespace: freeradius
     metrics:
-      - freeradius_total_access_requests
-      - freeradius_total_access_accepts
-      - freeradius_total_access_rejects
-      - freeradius_total_access_challenges
-      - freeradius_total_auth_responses
-      - freeradius_total_auth_duplicate_requests
-      - freeradius_total_auth_malformed_requests
-      - freeradius_total_auth_invalid_requests
-      - freeradius_total_auth_dropped_requests
-      - freeradius_total_acct_requests
-      - freeradius_total_acct_responses
-      - freeradius_total_acct_duplicate_requests
-      - freeradius_total_acct_dropped_requests
-      - freeradius_queue_len_internal
-      - freeradius_queue_len_proxy
-      - freeradius_queue_len_auth
-      - freeradius_queue_len_acct
-      - freeradius_queue_pps_in
-      - freeradius_queue_pps_out
-      - freeradius_queue_use_percentage
-      - freeradius_up
-      - freeradius_outstanding_requests
+      - freeradius_total_access_requests: total_access_requests
+      - freeradius_total_access_accepts: total_access_accepts
+      - freeradius_total_access_rejects: total_access_rejects
+      - freeradius_total_access_challenges: total_access_challenges
+      - freeradius_total_auth_responses: total_auth_responses
+      - freeradius_total_auth_duplicate_requests: total_auth_duplicate_requests
+      - freeradius_total_auth_malformed_requests: total_auth_malformed_requests
+      - freeradius_total_auth_invalid_requests: total_auth_invalid_requests
+      - freeradius_total_auth_dropped_requests: total_auth_dropped_requests
+      - freeradius_total_auth_unknown_types: total_auth_unknown_types
+      - freeradius_total_acct_requests: total_acct_requests
+      - freeradius_total_acct_responses: total_acct_responses
+      - freeradius_total_acct_duplicate_requests: total_acct_duplicate_requests
+      - freeradius_total_acct_malformed_requests: total_acct_malformed_requests
+      - freeradius_total_acct_invalid_requests: total_acct_invalid_requests
+      - freeradius_total_acct_dropped_requests: total_acct_dropped_requests
+      - freeradius_total_acct_unknown_types: total_acct_unknown_types
+      - freeradius_queue_len_internal: queue_len_internal
+      - freeradius_queue_len_proxy: queue_len_proxy
+      - freeradius_queue_len_auth: queue_len_auth
+      - freeradius_queue_len_acct: queue_len_acct
+      - freeradius_queue_len_detail: queue_len_detail
+      - freeradius_queue_pps_in: queue_pps_in
+      - freeradius_queue_pps_out: queue_pps_out
+      - freeradius_start_time: start_time
+      - freeradius_hup_time: hup_time
+      - freeradius_up: up
 DDMETRICSEOF
 
 # Restart Datadog Agent to pick up all new config
