@@ -54,11 +54,11 @@ Technical deep-dive into how cloud-8021x works. Read this if you need to modify 
 │  │└──────────┘│ └────────┘ │Cron jobs                    │  │
 │  └────────────┘            │ */5  unifi-ap-cache.sh      │  │
 │                            │ */30 jamf-device-cache.sh   │  │
-│  ┌──────────────────┐      └─────────────────────────────┘  │
+│  ┌───────────────────┐     └─────────────────────────────┘  │
 │  │Log files          │                                      │
 │  │ radius-auth.json  │     ┌─────────────────────────────┐  │
 │  │ radius-acct.json  │     │Cache files                  │  │
-│  └──────────────────┘      │ /etc/freeradius/3.0/        │  │
+│  └───────────────────┘     │ /etc/freeradius/3.0/        │  │
 │                            │  jamf-device-cache.json     │  │
 │                            │  unifi-ap-cache.json        │  │
 │                            └─────────────────────────────┘  │
@@ -137,7 +137,7 @@ Client chain (device identity):
 ```
 MacBook              WiFi AP              FreeRADIUS
   │                    │                     │
-  │── 802.1X Start ──> │                      │
+  │── 802.1X Start ──> │                     │
   │                    │── Access-Request ─> │
   │                    │  (User-Name=serial) │
   │                    │                     │
