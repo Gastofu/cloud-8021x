@@ -689,6 +689,12 @@ def post_auth(p):
             except Exception as e:
                 radiusd.radlog(radiusd.L_ERR, f"Jamf lookup failed: {e}")
 
+        # Extract SSID from Called-Station-Id (format: "AA-BB-CC-DD-EE-FF:SSID")
+        if called_station and ":" in called_station:
+            ssid = called_station.split(":", 1)[1]
+            if ssid:
+                reply_attrs.append(("Login-LAT-Port", ssid))
+
         # UniFi lookup — use Called-Station-Id (AP BSSID) to identify AP
         if called_station:
             try:
@@ -750,8 +756,8 @@ linelog json_log {
     reference = "messages.%%{%%{reply:Packet-Type}:-unknown}"
 
     messages {
-        Access-Accept = "{\"timestamp\":\"%S\",\"event\":\"Access-Accept\",\"serial\":\"%%{User-Name}\",\"device_owner\":\"%%{reply:Reply-Message}\",\"device_name\":\"%%{reply:Filter-Id}\",\"device_model\":\"%%{reply:Login-LAT-Node}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\"}"
-        Access-Reject = "{\"timestamp\":\"%S\",\"event\":\"Access-Reject\",\"username\":\"%%{User-Name}\",\"device_name\":\"%%{reply:Filter-Id}\",\"device_model\":\"%%{reply:Login-LAT-Node}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\",\"reject_reason\":\"%%{Module-Failure-Message}\"}"
+        Access-Accept = "{\"timestamp\":\"%S\",\"event\":\"Access-Accept\",\"serial\":\"%%{User-Name}\",\"device_owner\":\"%%{reply:Reply-Message}\",\"device_name\":\"%%{reply:Filter-Id}\",\"device_model\":\"%%{reply:Login-LAT-Node}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"ssid\":\"%%{reply:Login-LAT-Port}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\"}"
+        Access-Reject = "{\"timestamp\":\"%S\",\"event\":\"Access-Reject\",\"username\":\"%%{User-Name}\",\"device_name\":\"%%{reply:Filter-Id}\",\"device_model\":\"%%{reply:Login-LAT-Node}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\",\"nas_port\":\"%%{NAS-Port}\",\"calling_station\":\"%%{Calling-Station-Id}\",\"ssid\":\"%%{reply:Login-LAT-Port}\",\"site_name\":\"%%{reply:Connect-Info}\",\"ap_name\":\"%%{reply:Callback-Id}\",\"cert_cn\":\"%%{TLS-Client-Cert-Common-Name}\",\"cert_issuer\":\"%%{TLS-Client-Cert-Issuer}\",\"reject_reason\":\"%%{Module-Failure-Message}\"}"
         unknown = "{\"timestamp\":\"%S\",\"event\":\"unknown\",\"username\":\"%%{User-Name}\",\"src_ip\":\"%%{Packet-Src-IP-Address}\",\"nas_ip\":\"%%{NAS-IP-Address}\"}"
     }
 }
@@ -953,11 +959,13 @@ EXPORTER_VERSION="0.1.9"
 EXPORTER_URL="https://github.com/bvantagelimited/freeradius_exporter/releases/download/$${EXPORTER_VERSION}/freeradius_exporter-$${EXPORTER_VERSION}-amd64.tar.gz"
 EXPORTER_DIR="/tmp/freeradius_exporter"
 
-mkdir -p "$EXPORTER_DIR"
-curl -fsSL "$EXPORTER_URL" | tar xz -C "$EXPORTER_DIR"
-cp "$EXPORTER_DIR/freeradius_exporter-$${EXPORTER_VERSION}-amd64/freeradius_exporter" /usr/local/bin/freeradius_exporter
-chmod +x /usr/local/bin/freeradius_exporter
-rm -rf "$EXPORTER_DIR"
+if [ ! -f /usr/local/bin/freeradius_exporter ]; then
+    mkdir -p "$EXPORTER_DIR"
+    curl -fsSL "$EXPORTER_URL" | tar xz -C "$EXPORTER_DIR"
+    cp "$EXPORTER_DIR/freeradius_exporter-$${EXPORTER_VERSION}-amd64/freeradius_exporter" /usr/local/bin/freeradius_exporter
+    chmod +x /usr/local/bin/freeradius_exporter
+    rm -rf "$EXPORTER_DIR"
+fi
 
 # Create systemd service for the exporter
 STATUS_SECRET="testing123"
