@@ -139,9 +139,20 @@ variable "tls_session_cache" {
 }
 
 variable "tls_session_cache_lifetime" {
-  description = "TLS session cache lifetime in seconds (default: 24 hours)"
+  description = "TLS session cache lifetime in hours (default: 24)"
   type        = number
-  default     = 86400
+  default     = 24
+}
+
+variable "tls_max_version" {
+  description = "Maximum TLS version for EAP-TLS (1.2 or 1.3). Use 1.2 for disk-based session cache persistence across restarts."
+  type        = string
+  default     = "1.2"
+
+  validation {
+    condition     = contains(["1.2", "1.3"], var.tls_max_version)
+    error_message = "tls_max_version must be \"1.2\" or \"1.3\"."
+  }
 }
 
 variable "datadog_api_key" {

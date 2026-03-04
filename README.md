@@ -111,7 +111,8 @@ See [terraform.tfvars.example](terraform.tfvars.example) for all options. Key va
 | `rewrite_username` | No | Set reply:User-Name to `email - serial` in Access-Accept (default: `false`) |
 | `rewrite_username_separator` | No | Separator between email and serial in rewritten User-Name (default: ` - `) |
 | `tls_session_cache` | No | Enable TLS session caching for faster re-auth (default: `true`) |
-| `tls_session_cache_lifetime` | No | TLS session cache lifetime in seconds (default: `86400`) |
+| `tls_session_cache_lifetime` | No | TLS session cache lifetime in hours (default: `24`) |
+| `tls_max_version` | No | Max TLS version: `1.2` (default, disk cache works) or `1.3` (in-memory only) |
 | `unifi_url` | No | UniFi API URL — enables AP/site name in auth logs |
 | `unifi_api_key` | No | UniFi API key (read-only access) |
 | `datadog_app_key` | No | Datadog Application key — enables Terraform-managed dashboard |

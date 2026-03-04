@@ -21,6 +21,7 @@ REWRITE_USERNAME="${rewrite_username}"
 REWRITE_USERNAME_SEPARATOR="${rewrite_username_separator}"
 TLS_SESSION_CACHE="${tls_session_cache}"
 TLS_SESSION_CACHE_LIFETIME="${tls_session_cache_lifetime}"
+TLS_MAX_VERSION="${tls_max_version}"
 RADIUS_CLIENTS_JSON='${radius_clients_json}'
 DATADOG_SITE="${datadog_site}"
 
@@ -196,13 +197,17 @@ eap {
         ecdh_curve = "prime256v1"
 
         tls_min_version = "1.2"
-        tls_max_version = "1.3"
+        tls_max_version = "__TLS_MAX_VERSION__"
 
+        # In-memory TLS session cache — speeds up re-auths within a server's uptime.
+        # Note: persist_dir (disk cache) is broken in FreeRADIUS 3.x + OpenSSL 3.0
+        # due to changed session callback APIs. Sessions won't survive restarts.
+        # FreeRADIUS 4.0's cache_tls module will fix this.
         cache {
             enable = __TLS_CACHE_ENABLE__
+            name = "eap-tls"
             lifetime = __TLS_CACHE_LIFETIME__
             max_entries = 4096
-            persist_dir = "$${db_dir}/tlscache"
         }
 
         verify {
@@ -222,11 +227,8 @@ else
     sed -i 's/__TLS_CACHE_ENABLE__/no/' "$RADDB/mods-available/eap"
 fi
 sed -i "s/__TLS_CACHE_LIFETIME__/$TLS_SESSION_CACHE_LIFETIME/" "$RADDB/mods-available/eap"
+sed -i "s/__TLS_MAX_VERSION__/$TLS_MAX_VERSION/" "$RADDB/mods-available/eap"
 
-# Create TLS session cache directory (needed even when cache is disabled — FreeRADIUS validates the path)
-mkdir -p "$RADDB/tlscache"
-chown freerad:freerad "$RADDB/tlscache"
-chmod 700 "$RADDB/tlscache"
 
 # ---------------------------------------------------------------------------
 # 6. Configure RADIUS clients — per-office UniFi APs
